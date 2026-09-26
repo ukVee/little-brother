@@ -62,3 +62,13 @@ install:
 	install -m 0755 -o root -g root $(RT) $(PREFIX)/cement-ir-rt
 	@echo "installed $(PREFIX)/cement-ir-rt"
 	@$(PREFIX)/cement-ir-rt --version
+	@# This install's own `sudo` triggers face auth, which socket-activates a
+	@# daemon running the binary we are ABOUT to replace -- and it then stays
+	@# warm for IRFACED_IDLE_SECS. So the first test after an install silently
+	@# exercises the OLD code. That produced two misleading results in a row on
+	@# 2026-09-26 (a spin measurement and a latch test, both of the wrong
+	@# binary). Stop it here: the socket unit keeps listening and the next auth
+	@# spawns what was just installed.
+	@systemctl stop irfaced.service 2>/dev/null \
+	  && echo "stopped the warm irfaced (the socket reactivates it on the next auth)" \
+	  || true
