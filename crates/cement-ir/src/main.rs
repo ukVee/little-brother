@@ -437,7 +437,7 @@ fn torch_post_release() -> ExitCode {
     }
     if pr.latched() {
         eprintln!(
-            "cement-ir-rt: GSTAT latched at release ({}) and was cleared. A latch on EVERY cycle is the boost's turn-off transient, not a brownout -- `cement-ir soak 20` is what tells the two apart.",
+            "cement-ir-rt: GSTAT latched ({}) and was cleared. On this hardware the boost latches OVP in normal operation -- measured present while the emitter was still lit -- so this is expected, not a brownout. `cement-ir soak 20` reports how many cycles of N do it.",
             decode::join(&decode::gstat(pr.gstat)),
         );
         return ExitCode::FAILURE;

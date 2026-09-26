@@ -495,7 +495,7 @@ pub fn soak_run(o: Opts) -> ExitCode {
         println!(
             "soak: GSTAT latched a power fault at release on {latched}/{ran} cycles (the teardown cleared each one). {}",
             if latched == ran {
-                "EVERY cycle -- that is the boost's turn-off transient, not a brownout, and both the refusal wording and hardware/notes/005's '130 mA x 40 s' framing need correcting."
+                "EVERY cycle -- the boost latches it in normal operation, not as a brownout. A SIGKILL test caught GSTAT already 0x48 with the emitter STILL LIT and the watchdog not yet fired, so it latches while running, not at turn-off; a soak only samples at release and cannot see that. hardware/notes/005's '130 mA x 40 s' framing needs correcting either way."
             } else {
                 "SOME cycles -- that is the brownout signature: the emitter is stressing the rail the sensor shares."
             }
