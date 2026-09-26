@@ -28,6 +28,9 @@ FAILED=()
 ok()   { printf '  ok    %-26s %s\n' "$1" "${2-}"; }
 bad()  { printf '  FAIL  %-26s %s\n' "$1" "${2-}"; FAILED+=("$1: ${2-}"); }
 skip() { printf '  skip  %-26s %s\n' "$1" "${2-}"; }
+# Neither pass nor fail: the check could not mean anything right now, and
+# saying why beats inventing a verdict.
+note() { printf '  note  %-26s %s\n' "$1" "${2-}"; }
 # warn: a real future failure that is not one yet. Does NOT set the exit code --
 # a check that cries wolf gets ignored when it matters (the slice-006 lesson).
 warn() { printf '  warn  %-26s %s\n' "$1" "${2-}"; }
@@ -316,14 +319,27 @@ if [[ $EUID -eq 0 ]]; then
         if [[ $rc -ne 0 ]]; then
             bad "PMIC status" "cement-ir-rt torch status exited $rc"
         else
-            # A latched OVP|UVLO means the emitter browned out the sensor's rail;
-            # the sensor will be mute on i2c until a rebind (cement-ir recover).
-            grep -qE 'OVP|UVLO' <<<"$out" \
-                && bad "PMIC GSTAT" "latched -- sudo $ROOT/cement-ir recover" \
-                || ok "PMIC GSTAT" "no OVP|UVLO"
-            grep -q 'WLEDCTL.*en=1' <<<"$out" \
-                && bad "torch EN" "WLEDCTL EN still set" \
-                || ok "torch EN" "clear"
+            # Running doctor with sudo AUTHENTICATES, and that authentication
+            # lights the emitter for the length of a feed -- so these two
+            # checks were reading the PMIC mid-feed and failing on a machine
+            # doing exactly what it should (2026-09-26: `GSTAT 0x48` +
+            # `WLEDCTL 0x25 en=1 start=1`, both reported as problems, while
+            # irfaced was serving this very sudo). Say so instead of lying.
+            if systemctl is-active --quiet irfaced.service 2>/dev/null; then
+                note "PMIC GSTAT" "a feed is in flight (irfaced active) -- this sudo's own auth lit the emitter; re-run once it has idled out"
+                note "torch EN" "same: the emitter is lit for this feed, by design"
+            else
+                # A latched OVP|UVLO after a feed has ENDED is the real signal.
+                # Note that a latch at release is normal on this hardware (20/20
+                # cycles, D14) and the teardown clears it; one standing here
+                # means no teardown ran -- an abnormal exit.
+                grep -qE 'OVP|UVLO' <<<"$out" \
+                    && bad "PMIC GSTAT" "latched with no feed running -- an abnormal exit left it; sudo $ROOT/cement-ir recover" \
+                    || ok "PMIC GSTAT" "no OVP|UVLO"
+                grep -q 'WLEDCTL.*en=1' <<<"$out" \
+                    && bad "torch EN" "WLEDCTL EN still set with no feed running" \
+                    || ok "torch EN" "clear"
+            fi
         fi
     else
         skip "PMIC status" "$RT not installed -- make -C $ROOT build && sudo make -C $ROOT install"
