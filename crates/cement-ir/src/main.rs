@@ -230,6 +230,13 @@ enum Ip3yCmd {
 }
 
 fn main() -> ExitCode {
+    // Rust ignores SIGPIPE, so a closed reader turns every later `println!`
+    // into an EPIPE panic: `cement-ir-rt torch status | head -1` printed a
+    // backtrace instead of one line (2026-09-26). Restore the default
+    // disposition -- a tool that reports register state gets piped into
+    // `head`/`grep` constantly, and dying quietly is the correct answer.
+    // SAFETY: setting a signal disposition before any thread exists.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Torch { cmd } => match cmd {
@@ -423,33 +430,19 @@ fn torch_post_release() -> ExitCode {
             return ExitCode::SUCCESS;
         }
     };
-    match b.get(regs::GSTAT) {
-        Ok(g) => {
-            println!(
-                "  GSTAT after release 0x{g:02x}  [{}]",
-                decode::join(&decode::gstat(g))
-            );
-            if g & torch::GSTAT_BLOCK_LIGHT != 0 {
-                match torch::clear_gstat(&b) {
-                    Ok(after) => {
-                        eprintln!(
-                            "cement-ir-rt: GSTAT latched during the hold ({}) -- cleared to 0x{after:02x}; the sensor's rail browned out, run cement-ir recover",
-                            decode::join(&decode::gstat(g)),
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("cement-ir-rt: GSTAT latched and the clear failed: {e}");
-                    }
-                }
-                return ExitCode::FAILURE;
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("cement-ir-rt: post-release GSTAT read failed: {e}");
-            ExitCode::SUCCESS
-        }
+    let pr = torch::post_release(&b);
+    println!("  post-release {}", pr.describe());
+    if let Some(e) = &pr.err {
+        eprintln!("cement-ir-rt: post-release GSTAT: {e}");
     }
+    if pr.latched() {
+        eprintln!(
+            "cement-ir-rt: GSTAT latched at release ({}) and was cleared. A latch on EVERY cycle is the boost's turn-off transient, not a brownout -- `cement-ir soak 20` is what tells the two apart.",
+            decode::join(&decode::gstat(pr.gstat)),
+        );
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 fn torch_hold(steps: u8, duration: u64, parent: Option<u32>) -> ExitCode {

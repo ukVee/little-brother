@@ -137,6 +137,58 @@ pub fn clear_gstat(bus: &Bus) -> io::Result<u8> {
     bus.get(regs::GSTAT)
 }
 
+/// What a post-release `GSTAT` read found — see [`post_release`].
+#[derive(Debug, Default)]
+pub struct PostRelease {
+    /// `GSTAT` as read after the emitter went out.
+    pub gstat: u8,
+    /// `Some(after)` when a power-fault latch was present and cleared.
+    pub cleared: Option<u8>,
+    /// Why the check could not be taken, if it could not.
+    pub err: Option<String>,
+}
+
+impl PostRelease {
+    /// A power-fault latch was present when the emitter went out.
+    pub fn latched(&self) -> bool {
+        self.gstat & GSTAT_BLOCK_LIGHT != 0
+    }
+
+    pub fn describe(&self) -> String {
+        if let Some(e) = &self.err {
+            return format!("post-release GSTAT unreadable: {e}");
+        }
+        let bits = crate::decode::join(&crate::decode::gstat(self.gstat));
+        match self.cleared {
+            Some(after) => format!("GSTAT 0x{:02x} [{bits}] -> cleared to 0x{after:02x}", self.gstat),
+            None => format!("GSTAT 0x{:02x} [{bits}]", self.gstat),
+        }
+    }
+}
+
+/// Read `GSTAT` once the emitter is out, and clear a power-fault latch.
+///
+/// **One implementation for every path that lights the emitter.** It used to
+/// live only in the `torch hold` CLI, so the daemon lit, released, latched
+/// `OVP` and left it standing — and the *next* auth's pre-check refused on
+/// that stale latch. Face auth therefore worked about every other attempt
+/// (observed end to end on 2026-09-26, D3/D9). The pre-check stays strict
+/// precisely because this runs: after it, a latch that is still present is
+/// one no normal release produced.
+pub fn post_release(bus: &Bus) -> PostRelease {
+    let gstat = match bus.get(regs::GSTAT) {
+        Ok(g) => g,
+        Err(e) => return PostRelease { err: Some(e.to_string()), ..Default::default() },
+    };
+    if gstat & GSTAT_BLOCK_LIGHT == 0 {
+        return PostRelease { gstat, ..Default::default() };
+    }
+    match clear_gstat(bus) {
+        Ok(after) => PostRelease { gstat, cleared: Some(after), err: None },
+        Err(e) => PostRelease { gstat, cleared: None, err: Some(format!("clear failed: {e}")) },
+    }
+}
+
 pub struct Torch {
     bus: Bus,
     steps: u8,
@@ -177,6 +229,12 @@ impl Torch {
             thread::sleep(Duration::from_millis(50));
         }
         Ok(t)
+    }
+
+    /// The bus this guard holds — so a caller can take the post-release
+    /// reading without opening `/dev/i2c-2` a second time.
+    pub fn bus(&self) -> &Bus {
+        &self.bus
     }
 
     pub fn lit(&self) -> bool {

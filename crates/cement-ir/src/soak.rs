@@ -117,6 +117,12 @@ struct Cycle {
     faults: Vec<String>,
     /// The cycle hit the wedge signature specifically (vs. a config error).
     wedged: bool,
+    /// `GSTAT` latched a power fault when the emitter went out, and the
+    /// teardown cleared it. Counted, not faulted: a latch on every single
+    /// cycle is the boost's turn-off transient; a latch on some cycles is the
+    /// brownout. Only the count over N cycles can tell those apart, which is
+    /// the question this soak exists to answer.
+    latched_at_release: bool,
     detail: String,
 }
 
@@ -155,6 +161,7 @@ fn run_cycle(o: &Opts) -> Cycle {
         first_frame: None,
         faults: Vec::new(),
         wedged: false,
+        latched_at_release: false,
         detail: String::new(),
     };
     let started = Instant::now();
@@ -285,6 +292,7 @@ fn run_cycle(o: &Opts) -> Cycle {
 
     // 8. Teardown in the learned order — the mechanism under test.
     let t = capture::teardown("soak", torch, &mut cap, sink.as_mut(), &graph);
+    c.latched_at_release = t.post_release.as_ref().is_some_and(|p| p.latched());
     for e in &t.errors {
         // A failed STREAMOFF is itself the wedge's shape.
         c.fault(true, format!("teardown: {e}"));
@@ -395,6 +403,7 @@ pub fn soak_run(o: Opts) -> ExitCode {
     let started = Instant::now();
     let mut ok = 0u32;
     let mut wedges = 0u32;
+    let mut latched = 0u32;
     let mut recoveries = 0u32;
     let mut zero_frame = 0u32;
     let mut total_frames = 0u64;
@@ -423,6 +432,9 @@ pub fn soak_run(o: Opts) -> ExitCode {
             .first_frame
             .map(|d| format!("{} ms", d.as_millis()))
             .unwrap_or_else(|| "never".to_string());
+        if c.latched_at_release {
+            latched += 1;
+        }
         if c.ok() {
             ok += 1;
             println!(
@@ -468,7 +480,7 @@ pub fn soak_run(o: Opts) -> ExitCode {
     }
     // One summary line, the thing that gets pasted into the handoff.
     println!(
-        "soak: {ran} cycles, {ok} ok, {wedges} wedges, {recoveries} recoveries, {zero_frame} zero-frame; frames {total_frames} (min {min_frames}/cycle); slowest first frame {}; {:.1} s",
+        "soak: {ran} cycles, {ok} ok, {wedges} wedges, {recoveries} recoveries, {zero_frame} zero-frame, {latched} latched-at-release; frames {total_frames} (min {min_frames}/cycle); slowest first frame {}; {:.1} s",
         worst_first
             .map(|d| format!("{} ms", d.as_millis()))
             .unwrap_or_else(|| "n/a".to_string()),
@@ -479,6 +491,16 @@ pub fn soak_run(o: Opts) -> ExitCode {
         recover_after - recover_before,
         wedge_after - wedge_before,
     );
+    if latched > 0 {
+        println!(
+            "soak: GSTAT latched a power fault at release on {latched}/{ran} cycles (the teardown cleared each one). {}",
+            if latched == ran {
+                "EVERY cycle -- that is the boost's turn-off transient, not a brownout, and both the refusal wording and hardware/notes/005's '130 mA x 40 s' framing need correcting."
+            } else {
+                "SOME cycles -- that is the brownout signature: the emitter is stressing the rail the sensor shares."
+            }
+        );
+    }
     if ok == ran && ran == o.cycles {
         println!("soak: PASS — no wedge, no recovery, no zero-frame cycle");
         ExitCode::SUCCESS

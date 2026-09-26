@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use irctl::{fourcc, media, subdev, video};
-use tps68470::torch::Torch;
+use tps68470::torch::{self, Torch};
 
 use crate::faults;
 
@@ -217,6 +217,9 @@ pub struct Teardown {
     /// One entry per step that failed. Empty = clean teardown, which is the
     /// whole point of the ordering below.
     pub errors: Vec<String>,
+    /// What `GSTAT` said once the emitter was out, and whether a latch had to
+    /// be cleared. `None` when this cycle never held the torch.
+    pub post_release: Option<torch::PostRelease>,
 }
 
 /// Tear a capture cycle down in the learned order. **One copy for the daemon
@@ -240,6 +243,7 @@ pub fn teardown(
     graph: &Graph,
 ) -> Teardown {
     let mut errors = Vec::new();
+    let mut post_release = None;
     // 1. Torch out FIRST.
     if let Some(mut t) = torch {
         match t.off() {
@@ -251,6 +255,17 @@ pub fn teardown(
             }
             Ok(()) => eprintln!("{tag}: torch released"),
         }
+        // 1b. The post-release GSTAT check, on the guard's own bus. This ran
+        // only in the `torch hold` CLI until 2026-09-26, so the daemon left
+        // every OVP latch standing and the next auth's pre-check refused on
+        // it -- face auth worked about every other attempt. Same code both
+        // paths now; the strict pre-check depends on this having run.
+        let pr = torch::post_release(t.bus());
+        eprintln!("{tag}: post-release {}", pr.describe());
+        if let Some(e) = &pr.err {
+            errors.push(format!("post-release GSTAT: {e}"));
+        }
+        post_release = Some(pr);
     }
     // 2. Capture STREAMOFF (producer first).
     if let Err(e) = cap.stop() {
@@ -267,5 +282,5 @@ pub fn teardown(
         }
     }
     // 4. Readback.
-    Teardown { readback: readback(graph), errors }
+    Teardown { readback: readback(graph), errors, post_release }
 }
