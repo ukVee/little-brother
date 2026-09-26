@@ -83,6 +83,25 @@ else
     skip "dw9719 carry" "cement-ir-rt not built or installed -- make -C $ROOT build (then sudo make install)"
 fi
 
+# The watchdog around the carry (slice 008): the check that runs without being
+# remembered. Both are bombadil-sourced and Exec the INSTALLED binary, so their
+# absence is a deployment gap, not a code gap.
+HOOK=/etc/pacman.d/hooks/90-cement-ir-dw9719.hook
+if [[ -L $HOOK ]]; then
+    ok "pacman hook" "bombadil-managed ($(readlink -f "$HOOK"))"
+elif [[ -e $HOOK ]]; then
+    bad "pacman hook" "present but not a bombadil symlink -- run: bombadil link"
+else
+    bad "pacman hook" "absent -- a kernel upgrade can break the carry unwatched (sudo mkdir -p ${HOOK%/*}; bombadil link)"
+fi
+if systemctl cat cement-ir-dkms-check.service >/dev/null 2>&1; then
+    systemctl is-enabled cement-ir-dkms-check.service >/dev/null 2>&1 \
+        && ok "boot check unit" "enabled" \
+        || bad "boot check unit" "installed but not enabled -- sudo systemctl enable cement-ir-dkms-check.service"
+else
+    bad "boot check unit" "cement-ir-dkms-check.service not installed (bombadil link + daemon-reload)"
+fi
+
 echo "=== media graph (resolved by entity name -- node numbers move) ==="
 sensor=$(media_entity_sensor)
 if [[ -n $sensor ]]; then

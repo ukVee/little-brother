@@ -24,7 +24,9 @@
 //! neither carries a repo path.
 
 use std::fs::File;
+use std::io::Read;
 use std::process::{Command, ExitCode};
+use std::time::{Duration, Instant};
 
 use irctl::media;
 
@@ -46,6 +48,31 @@ const LINKED_SENSORS: [&str; 2] = ["ov7251", "ov8865"];
 
 const MEDIA_DEV: &str = "/dev/media0";
 
+/// Which kernel's carry is being judged.
+///
+/// This distinction is the difference between a hook that means something and
+/// one that is decorative. In a `PostTransaction` hook the **running** kernel
+/// is still the old one: the module DKMS just built is for the *incoming*
+/// kernel and is not loaded, so `loaded srcversion`, the VCM bind and the pad
+/// links all describe the kernel being replaced. Only the on-disk checks can
+/// say anything about what will come up after the reboot.
+pub enum Scope {
+    /// The running kernel — everything, including the runtime consequences.
+    Running,
+    /// A specific `uname -r` (what the pacman hook passes): the on-disk checks
+    /// only, via `modinfo -k`.
+    Kernel(String),
+}
+
+impl Scope {
+    fn label(&self) -> String {
+        match self {
+            Scope::Running => "the running kernel".to_string(),
+            Scope::Kernel(k) => format!("kernel {k} (not running yet)"),
+        }
+    }
+}
+
 pub struct Check {
     pub name: &'static str,
     pub pass: bool,
@@ -60,10 +87,14 @@ fn bad(name: &'static str, detail: impl Into<String>) -> Check {
     Check { name, pass: false, detail: detail.into() }
 }
 
-/// `modinfo -F <field> dw9719`, trimmed. `None` = modinfo failed or said
-/// nothing (module not found on disk, or kmod missing).
-fn modinfo(field: &str) -> Option<String> {
-    let out = Command::new("modinfo").arg("-F").arg(field).arg("dw9719").output().ok()?;
+/// `modinfo [-k <ver>] -F <field> dw9719`, trimmed. `None` = modinfo failed or
+/// said nothing (module not found on disk, or kmod missing).
+fn modinfo(scope: &Scope, field: &str) -> Option<String> {
+    let mut cmd = Command::new("modinfo");
+    if let Scope::Kernel(k) = scope {
+        cmd.arg("-k").arg(k);
+    }
+    let out = cmd.arg("-F").arg(field).arg("dw9719").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -96,39 +127,62 @@ fn sensor_links(topo: &media::Topology, prefix: &str) -> Option<usize> {
 /// Run all five conditions. Pure reporting — never loads, rebuilds or rebinds
 /// anything (`cement-ir dkms install` is the only thing that mutates, and it
 /// is root-gated shell).
-pub fn verify() -> Vec<Check> {
+pub fn verify(scope: &Scope) -> Vec<Check> {
     let mut checks = Vec::new();
+    let running = matches!(scope, Scope::Running);
 
-    // 1. Is a module called dw9719 loaded at all?
-    let loaded = std::fs::read_to_string("/sys/module/dw9719/srcversion")
-        .ok()
-        .map(|s| s.trim().to_string());
-    match &loaded {
-        Some(v) => checks.push(ok("module loaded", format!("srcversion {v}"))),
-        None => checks.push(bad(
-            "module loaded",
-            "dw9719 is not loaded — no camera can enumerate (sudo modprobe dw9719)",
-        )),
+    // 1. Is a module called dw9719 loaded at all? (Running only — nothing is
+    //    loaded for a kernel that has not booted.)
+    let loaded = if running {
+        std::fs::read_to_string("/sys/module/dw9719/srcversion")
+            .ok()
+            .map(|s| s.trim().to_string())
+    } else {
+        None
+    };
+    if running {
+        match &loaded {
+            Some(v) => checks.push(ok("module loaded", format!("srcversion {v}"))),
+            None => checks.push(bad(
+                "module loaded",
+                "dw9719 is not loaded — no camera can enumerate (sudo modprobe dw9719)",
+            )),
+        }
     }
 
     // 2. Does the loaded module match what is on disk? A mismatch means the
     //    stock module squatted the name before DKMS's copy was reached.
-    let on_disk = modinfo("srcversion");
-    match (&loaded, &on_disk) {
-        (Some(l), Some(d)) if l == d => checks.push(ok("srcversion matches", d.clone())),
-        (Some(l), Some(d)) => checks.push(bad(
-            "srcversion matches",
-            format!("loaded {l} != on-disk {d} (the stock module squatted the name)"),
-        )),
-        (_, None) => checks.push(bad(
-            "srcversion matches",
-            "modinfo could not read dw9719 (not installed on disk, or kmod is missing)",
-        )),
-        (None, _) => {} // already reported by check 1
+    let on_disk = modinfo(scope, "srcversion");
+    if !running {
+        // The only question that can be answered before the reboot: did DKMS
+        // actually build and install the carry for the incoming kernel?
+        match &on_disk {
+            Some(v) => checks.push(ok("built for this kernel", format!("srcversion {v}"))),
+            None => checks.push(bad(
+                "built for this kernel",
+                "no dw9719 module on disk for it — the DKMS autoinstall did not produce one (dkms status; sudo cement-ir dkms install)",
+            )),
+        }
+    }
+    if running {
+        match (&loaded, &on_disk) {
+            (Some(l), Some(d)) if l == d => checks.push(ok("srcversion matches", d.clone())),
+            (Some(l), Some(d)) => checks.push(bad(
+                "srcversion matches",
+                format!("loaded {l} != on-disk {d} (the stock module squatted the name)"),
+            )),
+            (_, None) => checks.push(bad(
+                "srcversion matches",
+                "modinfo could not read dw9719 (not installed on disk, or kmod is missing)",
+            )),
+            (None, _) => {} // already reported by check 1
+        }
     }
 
-    // 3. Is the loaded build the vetted patch?
-    match &loaded {
+    // 3. Is the build the vetted patch? (For a not-yet-running kernel, the
+    //    on-disk build answers it.)
+    let build = if running { loaded.clone() } else { on_disk.clone() };
+    match &build {
         Some(v) if v == PATCHED_SRCVERSION => {
             checks.push(ok("patched build", format!("the carry ({PATCHED_SRCVERSION})")))
         }
@@ -148,7 +202,7 @@ pub fn verify() -> Vec<Check> {
     }
 
     // 4. The missing id_table, seen from userspace: no i2c alias.
-    match modinfo("alias") {
+    match modinfo(scope, "alias") {
         Some(aliases) => {
             let n = aliases.lines().filter(|l| l.trim() == "i2c:dw9719").count();
             if n >= 1 {
@@ -165,13 +219,19 @@ pub fn verify() -> Vec<Check> {
 
     // 5. DKMS's copy takes precedence over kernel/ — that precedence is the
     //    whole mechanism, so check where modprobe would actually resolve.
-    match modinfo("filename") {
+    match modinfo(scope, "filename") {
         Some(f) if f.contains("/updates/dkms/") => checks.push(ok("resolved from dkms", f)),
         Some(f) => checks.push(bad(
             "resolved from dkms",
             format!("{f} — not /updates/dkms/, so this is the in-tree build"),
         )),
         None => checks.push(bad("resolved from dkms", "modinfo could not read the filename")),
+    }
+
+    if !running {
+        // Everything below is a runtime consequence of the module that is
+        // LOADED, so it belongs to the running kernel, not this one.
+        return checks;
     }
 
     // 6. The bind everything downstream waits for.
@@ -212,13 +272,37 @@ pub fn verify() -> Vec<Check> {
     checks
 }
 
-/// `cement-ir-rt dkms verify [--porcelain]`.
-///
-/// Human format mirrors `doctor`'s one-line-per-check layout. `--porcelain`
-/// emits `status|name|detail` so the shell half can render the same checks in
-/// its own table without a second implementation of any of them.
-pub fn verify_run(porcelain: bool) -> ExitCode {
-    let checks = verify();
+/// Kernel versions named by the paths pacman feeds a `NeedsTargets` hook on
+/// stdin (`usr/lib/modules/<ver>/modules.order`, the same trigger DKMS uses).
+/// Deduplicated, order preserved. Empty = nothing kernel-shaped was matched.
+pub fn kernels_from_pacman_targets(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in input.lines() {
+        let l = line.trim().trim_start_matches('/');
+        let Some(rest) = l.strip_prefix("usr/lib/modules/") else { continue };
+        let Some(ver) = rest.split('/').next() else { continue };
+        // A module dir is a version, never a file: skip stray direct children.
+        if ver.is_empty() || !rest.contains('/') {
+            continue;
+        }
+        if !out.iter().any(|v| v == ver) {
+            out.push(ver.to_string());
+        }
+    }
+    out
+}
+
+/// Print one scope's checks; returns true if they all passed.
+fn report(scope: &Scope, porcelain: bool, settle: u64) -> bool {
+    // The boot unit's problem: sensor probing is asynchronous, so the pad links
+    // may not exist yet a second after `multi-user.target`. Poll to the
+    // deadline rather than reporting a race as a regression.
+    let deadline = Instant::now() + Duration::from_secs(settle);
+    let mut checks = verify(scope);
+    while settle > 0 && checks.iter().any(|c| !c.pass) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        checks = verify(scope);
+    }
     let failed: Vec<&Check> = checks.iter().filter(|c| !c.pass).collect();
     for c in &checks {
         if porcelain {
@@ -234,15 +318,20 @@ pub fn verify_run(porcelain: bool) -> ExitCode {
     }
     if failed.is_empty() {
         if !porcelain {
-            println!("dkms verify: the dw9719 carry is intact ({} checks)", checks.len());
+            println!(
+                "dkms verify: the dw9719 carry is intact for {} ({} checks)",
+                scope.label(),
+                checks.len()
+            );
         }
-        return ExitCode::SUCCESS;
+        return true;
     }
     if !porcelain {
         eprintln!(
-            "dkms verify: {} of {} checks FAILED; first: {} — {}",
+            "dkms verify: {} of {} checks FAILED for {}; first: {} — {}",
             failed.len(),
             checks.len(),
+            scope.label(),
             failed[0].name,
             failed[0].detail
         );
@@ -250,7 +339,51 @@ pub fn verify_run(porcelain: bool) -> ExitCode {
             "dkms verify: without the patched dw9719 NO camera enumerates; re-cement with `sudo cement-ir dkms install`"
         );
     }
-    ExitCode::FAILURE
+    false
+}
+
+/// `cement-ir-rt dkms verify [--porcelain] [--kernel VER] [--from-pacman] [--settle S]`.
+///
+/// Human format mirrors `doctor`'s one-line-per-check layout. `--porcelain`
+/// emits `status|name|detail` so the shell half can render the same checks in
+/// its own table without a second implementation of any of them.
+///
+/// `--from-pacman` is the hook's mode: read `NeedsTargets` paths on stdin and
+/// judge the module built for each kernel version they name. In a
+/// `PostTransaction` hook that is the only meaningful question — see `Scope`.
+pub fn verify_run(porcelain: bool, kernel: Option<String>, from_pacman: bool, settle: u64) -> ExitCode {
+    let mut scopes: Vec<Scope> = Vec::new();
+    if from_pacman {
+        let mut input = String::new();
+        if std::io::stdin().read_to_string(&mut input).is_err() {
+            eprintln!("dkms verify: could not read the hook targets from stdin");
+        }
+        for k in kernels_from_pacman_targets(&input) {
+            scopes.push(Scope::Kernel(k));
+        }
+        if scopes.is_empty() {
+            // A trigger fired but named no kernel: better to say something
+            // about the running kernel than nothing at all.
+            eprintln!("dkms verify: the hook named no kernel module tree; falling back to the running kernel");
+            scopes.push(Scope::Running);
+        }
+    } else if let Some(k) = kernel {
+        scopes.push(Scope::Kernel(k));
+    } else {
+        scopes.push(Scope::Running);
+    }
+    let mut all_ok = true;
+    for s in &scopes {
+        if scopes.len() > 1 && !porcelain {
+            println!("--- {}", s.label());
+        }
+        all_ok &= report(s, porcelain, settle);
+    }
+    if all_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 #[cfg(test)]
@@ -264,11 +397,27 @@ mod tests {
         assert_eq!(PATCHED_SRCVERSION.len(), 23, "srcversion is 23 hex chars here");
     }
 
+    /// The hook's stdin is `NeedsTargets` paths; the kernel version is in
+    /// them, which is how the hook knows what DKMS just built for.
+    #[test]
+    fn kernel_versions_come_out_of_the_hook_targets() {
+        let input = "usr/lib/modules/6.19.8-arch1-3-surface/modules.order\n\
+                     usr/lib/modules/6.19.8-arch1-3-surface/build/include/\n\
+                     usr/lib/modules/6.20.1-arch1-1-surface/modules.order\n\
+                     usr/src/dw9719-fix-1.0/dkms.conf\n\
+                     usr/lib/modules/\n";
+        assert_eq!(
+            kernels_from_pacman_targets(input),
+            vec!["6.19.8-arch1-3-surface", "6.20.1-arch1-1-surface"]
+        );
+        assert!(kernels_from_pacman_targets("").is_empty());
+    }
+
     /// Every check name is unique — the shell half keys its table rows off
     /// them, and a duplicate would silently overwrite a row.
     #[test]
     fn check_names_are_unique() {
-        let checks = verify();
+        let checks = verify(&Scope::Running);
         let mut names: Vec<&str> = checks.iter().map(|c| c.name).collect();
         let total = names.len();
         names.sort_unstable();

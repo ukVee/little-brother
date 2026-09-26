@@ -37,9 +37,13 @@ source "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)/
 NAME=dw9719-fix
 VER=1.0
 SRC_DIR=/usr/src/${NAME}-${VER}
-# Where the patched source lives. NOT in this repo yet: losing it means
-# re-deriving the patch, which slice 008 of the milestone is meant to settle.
-STAGED=${STAGED:-/home/ukv/dw9719fix}
+# Where the patched source lives: IN THIS REPO, under git (slice 008). It used
+# to be only ~/dw9719fix -- outside version control, one `rm -rf` from gone
+# while the DKMS registration that depends on it stayed installed. Derived from
+# $ROOT like every other path here, so moving the repo costs nothing; STAGED=
+# still overrides it for a one-off build from somewhere else.
+# Provenance, the patch itself and the srcversions: system/dw9719/README.md.
+STAGED=${STAGED:-$ROOT/system/dw9719}
 
 # The five conditions live in the runtime core (crates/cement-ir/src/dkms.rs),
 # not here: the pacman hook and the boot unit call the INSTALLED binary, and a

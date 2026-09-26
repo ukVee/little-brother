@@ -43,6 +43,14 @@ One entry point (`cement-ir`) over a path the kernel does not assemble for us:
   path, which turns a defect into latency and hides how often it fires. It now
   runs only after a failure, every rebind is counted in `/run/cement-ir-faults`
   (tmpfs, since boot), and `cement-ir doctor` reports the rate.
+- **`cement-ir dkms verify`** is the watchdog on the `dw9719` carry, which is
+  what makes *any* camera appear. Eight conditions (loaded == on-disk == the
+  vetted patch, the `i2c:dw9719` alias, resolution from `/updates/dkms/`, the
+  VCM bind, one data link each for `ov7251` and `ov8865`), one implementation,
+  called by `doctor`, by a **pacman hook** in the same transaction as a kernel
+  upgrade, and by a **boot unit** that catches a DKMS rebuild which failed in an
+  earlier transaction. The patched source itself lives in `system/dw9719/` under
+  git — see its `README.md`.
 - **`cement-ir soak N`** is the evidence for that demotion: N full capture
   cycles back to back at the production operating point, through the same code
   the daemon runs, checking after each one that the sensor still answers I2C,
@@ -78,6 +86,7 @@ cement-ir          the only thing you run
 crates/            the Rust runtime core (workspace; build/test/install via `make`)
 lib/               internals; every path derived from the entry point's location
 system/            files that get installed into the system
+system/dw9719/     the patched kernel source the DKMS carry is built from
 docs/              repo-local records that are not garden material
 ```
 
@@ -100,4 +109,7 @@ Not done yet, and known: `cement-ir-rt` is not yet installed to `/usr/local/bin`
 (deferred check D4 — until it runs, the torch falls back to the in-tree release
 build), and the socket deployment waits on it. The wedge recovery came off the
 auth path in slices 006/007; the soak that proves it is `cement-ir soak 20`,
-whose run **with the illuminator** needs root and is a deferred check.
+whose run **with the illuminator** needs root and is a deferred check. The
+dw9719 watchdog (slice 008) is built but **not deployed**: the pacman hook and
+the boot unit are bombadil-sourced and wait on the same `bombadil link` + root
+session, which `doctor` reports as two FAILs until it happens.

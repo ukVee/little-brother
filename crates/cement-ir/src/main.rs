@@ -164,12 +164,24 @@ enum IrfacedCmd {
 
 #[derive(Subcommand)]
 enum DkmsCmd {
-    /// Report the five conditions; exit non-zero if any failed.
+    /// Report the conditions; exit non-zero if any failed.
     Verify {
         /// emit `status|name|detail` lines for the shell half instead of the
         /// human table (one implementation, two renderings)
         #[arg(long)]
         porcelain: bool,
+        /// judge the module built for this `uname -r` instead of the running
+        /// kernel (on-disk checks only — nothing is loaded for it yet)
+        #[arg(long)]
+        kernel: Option<String>,
+        /// the pacman hook's mode: read NeedsTargets paths on stdin and judge
+        /// the module built for every kernel version they name
+        #[arg(long)]
+        from_pacman: bool,
+        /// wait up to this many seconds for the checks to pass before
+        /// reporting (the boot unit's mode: sensor probing is asynchronous)
+        #[arg(long, default_value_t = 0)]
+        settle: u64,
     },
 }
 
@@ -241,7 +253,9 @@ fn main() -> ExitCode {
             IrfacedCmd::Resolve { media } => irfaced::resolve_run(&media),
         },
         Cmd::Dkms { cmd } => match cmd {
-            DkmsCmd::Verify { porcelain } => dkms::verify_run(porcelain),
+            DkmsCmd::Verify { porcelain, kernel, from_pacman, settle } => {
+                dkms::verify_run(porcelain, kernel, from_pacman, settle)
+            }
         },
         Cmd::Soak {
             cycles,
