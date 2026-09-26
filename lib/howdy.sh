@@ -52,8 +52,11 @@ fi
 
 FEEDLOG=/tmp/ir-feeder.log
 : > "$FEEDLOG"
+READY=/run/cement-ir/feed-ready.$$
+mkdir -p /run/cement-ir && chmod 700 /run/cement-ir
 "$LIB/irface.py" --gain "$GAIN" --current "$CUR" \
-    feed --device "$DEV" --duration "$DURATION" --fps 10 >"$FEEDLOG" 2>&1 &
+    feed --device "$DEV" --duration "$DURATION" --fps 10 --ready-file "$READY" \
+    >"$FEEDLOG" 2>&1 &
 FEEDER=$!
 
 # Give the feeder a clear head start before probing: it has to run ir-up.sh
@@ -76,16 +79,11 @@ trap cleanup EXIT
 echo -n "waiting for the feeder to produce a frame"
 ok=0
 for _ in $(seq 1 40); do
-  # Probe the way HOWDY reads -- OpenCV -- not the way that is convenient.
-  # ffmpeg as a v4l2 *reader* hangs on this loopback (exit 124) while v4l2-ctl
-  # pulls a full 307200-byte frame from the very same device. Gating on ffmpeg
-  # meant howdy was never launched even though the pipeline was healthy.
-  if timeout 6 python3 -c '
-import sys, cv2
-c = cv2.VideoCapture(sys.argv[1])
-ok, f = c.read()
-c.release()
-sys.exit(0 if ok and f is not None else 1)' "$DEV" 2>/dev/null; then
+  # The feeder signals its own readiness (slice 004): after the first unpacked
+  # frame reaches ffmpeg it touches $READY. The old probe read the loopback
+  # with python-opencv -- exactly the dependency the 2026-09-06 orphan sweep
+  # deleted -- and this project no longer imports cv2 anywhere.
+  if [[ -f $READY ]]; then
     ok=1; break
   fi
   if ! kill -0 "$FEEDER" 2>/dev/null; then
@@ -98,11 +96,11 @@ sys.exit(0 if ok and f is not None else 1)' "$DEV" 2>/dev/null; then
 done
 echo
 if [[ $ok -eq 0 ]]; then
-  echo "!! the loopback never produced a frame -- not running howdy." >&2
-  echo "   check: cement-ir doctor, and that python-opencv is installed." >&2
+  echo "!! the feeder never signaled a frame -- not running howdy." >&2
+  echo "   check: cement-ir doctor." >&2
   exit 1
 fi
-echo "feeder live on $DEV, readable by OpenCV (torch ${CUR}x32.5mA, gain $GAIN)"
+echo "feeder live on $DEV, signaled ready (torch ${CUR}x32.5mA, gain $GAIN)"
 echo "--- howdy $* ---"
 howdy "$@"
 rc=$?

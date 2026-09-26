@@ -98,18 +98,22 @@ diag_loopback() {
     timeout 10 ffmpeg -loglevel info -f v4l2 -i "$DEV" -frames:v 1 -y /tmp/diag.png 2>&1 | tail -12
     echo "  exit=$?  size=$(stat -c%s /tmp/diag.png 2>/dev/null || echo none)"
 
-    echo; echo "=== reader 3: OpenCV -- the one that decides whether howdy works ==="
-    timeout 10 python3 -c '
+    echo; echo "=== reader 3: the OpenCV read that decides whether howdy works ==="
+    echo "    howdy-next ships its own OpenCV (opencv>=5.0.0); nothing on this"
+    echo "    project's auth path imports cv2 anymore (slice 004). The probe below"
+    echo "    simulates howdy's reader only when python-opencv happens to be"
+    echo "    installed."
+    if python3 -c 'import cv2' 2>/dev/null; then
+        timeout 10 python3 -c '
 import sys
-try:
-    import cv2
-except ImportError:
-    sys.exit("  python-opencv is MISSING -- this is the readiness gate that the\n"
-             "  2026-09-06 orphan sweep broke. See journal/incidents/.")
+import cv2
 c = cv2.VideoCapture(sys.argv[1]); ok, f = c.read(); c.release()
 print(f"  ok={ok} frame={None if f is None else f.shape}")
 sys.exit(0 if ok and f is not None else 1)' "$DEV"
-    echo "  exit=$?"
+        echo "  exit=$?"
+    else
+        echo "  python-opencv not installed -- skipping the simulation (nothing needs it)"
+    fi
 
     echo; echo "=== feeder log so far ==="
     sed 's/^/  /' "$FEEDLOG"

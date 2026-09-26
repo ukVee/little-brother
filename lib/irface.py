@@ -264,6 +264,18 @@ def cmd_feed(a):
                 break
             ff.stdin.write(to8(ip3y.unpack(buf)).tobytes())
             n += 1
+            # The feeder's own readiness signal (slice 004): the first frame that
+            # ffmpeg actually accepted is the moment a consumer can start reading
+            # the loopback. Touch the marker the caller (PAM helper / howdy.sh)
+            # waits on -- no second process re-derives what this loop already
+            # knows, and nothing imports python-opencv to do it. If ffmpeg is
+            # already dead (poll() returns an rc), do not signal: the frame went
+            # nowhere.
+            if n == 1 and a.ready_file and ff.poll() is None:
+                try:
+                    pathlib.Path(a.ready_file).touch()
+                except OSError:
+                    pass
             if time.monotonic() - last_refresh > 8:      # inside the 13s watchdog
                 torch_refresh()
                 last_refresh = time.monotonic()
@@ -271,6 +283,12 @@ def cmd_feed(a):
         pass
     finally:
         torch_off()
+        # The marker lives only as long as this run does.
+        if a.ready_file:
+            try:
+                pathlib.Path(a.ready_file).unlink(missing_ok=True)
+            except OSError:
+                pass
         # Close the read end first so v4l2-ctl sees EPIPE and unwinds its own
         # streaming teardown, rather than being shot mid-DQBUF.
         try:
@@ -363,6 +381,9 @@ def main():
     s.add_argument("--device", required=True)
     s.add_argument("--duration", type=float, default=12.0)
     s.add_argument("--fps", type=int, default=15)
+    s.add_argument("--ready-file", default=None,
+                   help="touch this path once the first frame reaches ffmpeg "
+                        "(the feeder's own readiness signal, slice 004)")
 
     s = sub.add_parser("torch"); s.set_defaults(fn=cmd_torch)
     s.add_argument("action", choices=["on", "off", "status"])

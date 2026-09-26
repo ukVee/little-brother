@@ -73,23 +73,47 @@ fi
 timeout 25 "$CEMENT_IR_ROOT/lib/sensor-recover.sh" >/dev/null 2>&1
 echo "  sensor check rc=$?"
 
-setsid "$CEMENT_IR_ROOT/lib/irface.py" --gain 128 --current 1 \
-    feed --device /dev/video20 --duration 15 --fps 10 >/dev/null 2>&1 &
-echo "  feeder started pid $!"
+# Cheap pre-flight in front of the feeder: the module/link/loopback subset of
+# cement-ir doctor. One verdict line in the log, never blocking -- this script
+# is `auth optional` and exits 0 whatever doctor reports. The expensive checks
+# stay manual (`cement-ir doctor`).
+if bash "$CEMENT_IR_ROOT/lib/doctor.sh" --quick; then
+  echo "  doctor quick rc=0"
+else
+  echo "  doctor quick rc=$?"
+fi
 
-# Wait for a frame the way Howdy reads, so pam_howdy does not open a device
-# that is not producing yet -- OpenCV gives up on the first failed read.
+# The feeder signals its own readiness: after the first unpacked frame reaches
+# ffmpeg it touches $READY. This replaces the python-opencv probe the
+# 2026-09-06 orphan sweep silently killed -- 24 auth attempts ran with the
+# gate dead and logged a warning into /dev/null. No interpreter import, no
+# OpenCV, nothing left to orphan. The marker is per-invocation ($$), so two
+# attempts cannot cross-talk, and the feeder deletes it on exit.
+READY=/run/cement-ir/feed-ready.$$
+mkdir -p /run/cement-ir && chmod 700 /run/cement-ir
+
+setsid "$CEMENT_IR_ROOT/lib/irface.py" --gain 128 --current 1 \
+    feed --device /dev/video20 --duration 15 --fps 10 --ready-file "$READY" \
+    >/dev/null 2>&1 &
+FEEDER=$!
+echo "  feeder started pid $FEEDER"
+
+# Wait for the feeder's own signal -- bounded, and logged with the reason it
+# gave up. The old probe read the loopback the way Howdy does; the feeder
+# knows first-hand when a frame reached ffmpeg, which is the moment a reader
+# can start pulling. pam_howdy opens the device once and OpenCV gives up on
+# the first failed read, which is the race this gate exists to stop.
 for _ in $(seq 1 12); do
-  if timeout 3 python3 -c '
-import sys, cv2
-c = cv2.VideoCapture("/dev/video20")
-ok, f = c.read()
-c.release()
-sys.exit(0 if ok and f is not None else 1)' 2>/dev/null; then
-    echo "  loopback readable"
+  if [[ -f $READY ]]; then
+    echo "  feeder signaled readiness"
     exit 0
   fi
+  kill -0 "$FEEDER" 2>/dev/null || break
   sleep 0.4
 done
-echo "  WARNING: loopback never became readable; howdy will fall through"
+if kill -0 "$FEEDER" 2>/dev/null; then
+  echo "  WARNING: feeder never signaled readiness in ~5s; howdy will fall through"
+else
+  echo "  WARNING: feeder died before signaling readiness; howdy will fall through"
+fi
 exit 0
