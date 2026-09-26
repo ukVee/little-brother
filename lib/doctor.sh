@@ -56,7 +56,7 @@ if [[ -x $RT ]]; then
     if [[ -d $ROOT/crates ]]; then
         newer=$(find "$ROOT/crates" -name '*.rs' -newer "$RT" -print -quit 2>/dev/null)
         if [[ -n $newer ]]; then
-            bad "runtime binary" "stale: $(basename "$newer") newer than $RT -- sudo make -C $ROOT install"
+            bad "runtime binary" "stale: $(basename "$newer") newer than $RT -- make -C $ROOT build && sudo make -C $ROOT install"
         else
             ok "runtime binary" "$RT up to date"
         fi
@@ -64,7 +64,7 @@ if [[ -x $RT ]]; then
         ok "runtime binary" "$RT (no crates/ in this checkout)"
     fi
 else
-    skip "runtime binary" "not installed -- sudo make -C $ROOT install"
+    skip "runtime binary" "not installed -- make -C $ROOT build && sudo make -C $ROOT install"
 fi
 fi
 
@@ -261,7 +261,7 @@ if [[ $EUID -eq 0 ]]; then
                 || ok "torch EN" "clear"
         fi
     else
-        skip "PMIC status" "$RT not installed -- sudo make -C $ROOT install"
+        skip "PMIC status" "$RT not installed -- make -C $ROOT build && sudo make -C $ROOT install"
     fi
 else
     skip "PMIC status" "needs root (/dev/i2c-2 is root-only)"

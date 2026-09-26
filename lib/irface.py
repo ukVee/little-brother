@@ -62,11 +62,11 @@ def rt_binary():
                / "crates/cement-ir/target/release/cement-ir-rt")
     if os.path.isfile(cand) and os.access(cand, os.X_OK):
         print(f"  NOTE: cement-ir-rt not installed; using the in-tree build "
-              f"({cand}) -- sudo make -C <repo> install", file=sys.stderr)
+              f"({cand}) -- make -C <repo> build && sudo make -C <repo> install", file=sys.stderr)
         return cand
     raise RuntimeError(
         "cement-ir-rt not found (installed or built) -- "
-        "sudo make -C ~/projects/cement-ir install")
+        "make -C ~/projects/cement-ir build && sudo make -C ~/projects/cement-ir install")
 
 
 def arm_parent_death():

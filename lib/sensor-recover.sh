@@ -52,7 +52,7 @@ if [[ -n $RT ]]; then
     # Make sure the illuminator is not left drawing current.
     "$RT" torch off >/dev/null
 else
-    echo "  cement-ir-rt not found -- cannot read or clear the PMIC (sudo make -C $ROOT install)"
+    echo "  cement-ir-rt not found -- cannot read or clear the PMIC (make -C $ROOT build && sudo make -C $ROOT install)"
 fi
 
 echo
