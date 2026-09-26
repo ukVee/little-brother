@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Bring the IR capture path up on demand, immediately before capture.
+#
+#   ~/cement-ir/ir-up.sh            # configure the graph
+#   ~/cement-ir/ir-up.sh --capture N OUT.raw
+#
+# On-demand by choice: the IR sensor stays unpowered while idle rather than
+# sitting configured from boot.  Needs no sudo — logind's ACL covers /dev/media0
+# and /dev/video2 for the active seat user (the account is NOT in the `video`
+# group; the `+` in `ls -l` is the ACL).
+#
+# This only works once dw9719 actually binds; see cement-ir.sh.  If the entity
+# below is missing, that is the failure — not this script.
+set -euo pipefail
+
+MEDIA=${MEDIA:-/dev/media0}
+
+# The i2c bus number in the entity name can move between boots, so resolve the
+# entity by sensor name rather than hardcoding "ov7251 3-0060".
+SENSOR=$(media-ctl -p -d "$MEDIA" 2>/dev/null \
+         | sed -n 's/^- entity [0-9]*: \(ov7251 [0-9-]*\).*/\1/p' | head -1)
+
+if [[ -z ${SENSOR:-} ]]; then
+    echo "ov7251 not present in $MEDIA." >&2
+    echo "Almost certainly dw9719 failed to bind, so no links were created." >&2
+    echo "Check:  lsmod | grep dw9719   and   modinfo dw9719 | grep i2c:" >&2
+    exit 1
+fi
+
+# Which CSI-2 receiver it feeds is also not guaranteed stable.
+CSI=$(media-ctl -p -d "$MEDIA" 2>/dev/null \
+      | sed -n "/entity [0-9]*: $SENSOR/,/^- entity/p" \
+      | sed -n 's/.*-> "\(ipu3-csi2 [0-9]*\)":0.*/\1/p' | head -1)
+CSI=${CSI:-ipu3-csi2 2}
+
+echo "sensor: $SENSOR  ->  $CSI"
+
+media-ctl -d "$MEDIA" -l "\"$SENSOR\":0 -> \"$CSI\":0 [1]"
+media-ctl -d "$MEDIA" -V "\"$SENSOR\":0 [fmt:Y10_1X10/640x480]"
+media-ctl -d "$MEDIA" -V "\"$CSI\":0 [fmt:Y10_1X10/640x480]"
+
+# The CIO2 video node paired with that CSI-2 receiver.
+IDX=${CSI##* }
+VIDEO=/dev/video$IDX
+v4l2-ctl -d "$VIDEO" --set-fmt-video=width=640,height=480,pixelformat=ip3y >/dev/null
+
+# Exposure/gain MUST be set every time, right before capture.
+#
+# analogue_gain defaults to its MINIMUM (16), which yields a near-black frame
+# (10-bit range ~5..30 of 1023) that looks identical whatever the lighting. That
+# silently ruined a dark-room vs lit-room comparison on 2026-08-21: both frames
+# came back at mean ~16.5 and appeared to prove the illuminator did nothing, when
+# in reality neither capture had enough gain to show anything at all.
+#
+# There is no auto-exposure on this path — nothing runs the IPU3 IPA — so if you
+# do not set these, nothing will.
+SUBDEV=$(media-ctl -p -d "$MEDIA" 2>/dev/null \
+         | sed -n "/entity [0-9]*: $SENSOR/,/^- entity/p" \
+         | sed -n 's#.*device node name \(/dev/v4l-subdev[0-9]*\).*#\1#p' | head -1)
+
+GAIN=${GAIN:-1023}
+EXPOSURE=${EXPOSURE:-1704}
+if [[ -n ${SUBDEV:-} ]]; then
+    v4l2-ctl -d "$SUBDEV" --set-ctrl analogue_gain="$GAIN" >/dev/null
+    v4l2-ctl -d "$SUBDEV" --set-ctrl exposure="$EXPOSURE" >/dev/null
+    echo "sensor ctrls: gain=$GAIN exposure=$EXPOSURE  ($SUBDEV)"
+else
+    echo "WARNING: could not resolve the ov7251 subdev node; gain/exposure NOT set." >&2
+    echo "         Captures will be near-black at the default gain of 16." >&2
+fi
+
+echo "ready: $VIDEO (ip3y 640x480)"
+
+if [[ ${1:-} == --capture ]]; then
+    COUNT=${2:?need a frame count}
+    OUT=${3:?need an output path}
+    v4l2-ctl -d "$VIDEO" --stream-mmap --stream-count="$COUNT" --stream-to="$OUT"
+    ls -l "$OUT"
+    # 640px*10bit = 800 B/line, IPU3 aligns stride to 64 -> 832, *480 = 399360/frame
+    echo "expected $((399360 * COUNT)) bytes for $COUNT frames"
+fi

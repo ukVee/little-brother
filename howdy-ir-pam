@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# pam_exec helper: bring the IR feeder up just before pam_howdy.so runs.
+#
+# pam_howdy knows nothing about our feeder, and the ov7251 emits ip3y that
+# OpenCV cannot decode -- so irface.py must be unpacking frames onto
+# /dev/video20 (and driving the illuminator) before Howdy opens the device.
+#
+# ALWAYS exits 0. It is wired as `auth optional`, so it must never be able to
+# block authentication; if anything here fails, Howdy simply finds no camera
+# and PAM falls through to the password.
+#
+# Skips SSH sessions entirely. Howdy's own abort_if_ssh already refuses to
+# authenticate a remote user by camera, so starting the feeder there would fire
+# the IR emitter and add seconds of latency to every remote sudo for nothing.
+# Logging must never be fatal. pam_exec runs this with the REAL uid unless the
+# module is given `seteuid`, so without it this script is uid 1000 and cannot
+# write to /var/log -- which silently killed it at line 1 and left no trace of
+# why the camera never came up.
+LOG=/var/log/howdy-ir-pam.log
+if ! { : >>"$LOG"; } 2>/dev/null; then
+  LOG=/tmp/howdy-ir-pam.log
+  { : >>"$LOG"; } 2>/dev/null || LOG=/dev/null
+fi
+exec >>"$LOG" 2>&1
+echo "--- $(date -Is) service=${PAM_SERVICE:-?} user=${PAM_USER:-?} tty=${PAM_TTY:-?}"
+echo "  uid=$(id -u) euid=$(id -un) log=$LOG"
+if [[ $(id -u) -ne 0 ]]; then
+  echo "  NOT ROOT -- the pam_exec line needs the 'seteuid' option; giving up"
+  exit 0
+fi
+
+# Walk the process ancestry looking for sshd. PAM_RHOST is empty for sudo
+# inside an ssh session, so it cannot be used to detect this.
+p=$PPID
+for _ in $(seq 1 12); do
+  [[ -r /proc/$p/comm ]] || break
+  c=$(</proc/$p/comm)
+  if [[ $c == sshd* ]]; then
+    echo "  ssh session detected -- skipping (howdy aborts on ssh anyway)"
+    exit 0
+  fi
+  p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null) || break
+  [[ ${p:-0} -gt 1 ]] || break
+done
+
+# Already fed? Another auth attempt may still have a feeder running.
+if pgrep -f "irface.py .* feed " >/dev/null 2>&1; then
+  echo "  feeder already running"
+  exit 0
+fi
+
+# The sensor wedges after most feeder runs (STREAMON EINVAL, I2C EREMOTEIO);
+# rebinding ov7251 clears it. No-op when healthy.
+timeout 25 /home/ukv/cement-ir/sensor-recover.sh >/dev/null 2>&1
+echo "  sensor check rc=$?"
+
+setsid /home/ukv/cement-ir/irface.py --gain 128 --current 1 \
+    feed --device /dev/video20 --duration 15 --fps 10 >/dev/null 2>&1 &
+echo "  feeder started pid $!"
+
+# Wait for a frame the way Howdy reads, so pam_howdy does not open a device
+# that is not producing yet -- OpenCV gives up on the first failed read.
+for _ in $(seq 1 12); do
+  if timeout 3 python3 -c '
+import sys, cv2
+c = cv2.VideoCapture("/dev/video20")
+ok, f = c.read()
+c.release()
+sys.exit(0 if ok and f is not None else 1)' 2>/dev/null; then
+    echo "  loopback readable"
+    exit 0
+  fi
+  sleep 0.4
+done
+echo "  WARNING: loopback never became readable; howdy will fall through"
+exit 0
