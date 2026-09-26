@@ -10,7 +10,7 @@
 #   cement-ir recover                    clear a wedged ov7251 (fault handler)
 #   cement-ir soak   [N] [--steps N] [...]  N capture cycles: prove no wedge
 #   cement-ir howdy  <howdy args>        run a howdy command with the feeder live
-#   cement-ir pam    enable|disable|status|install-helper|set-device [service]
+#   cement-ir pam    enable|disable|status|list|set-device [service]
 #   cement-ir dkms   verify|install      the dw9719 DKMS carry
 #   cement-ir loopback install           persist /dev/video20
 #   cement-ir diag   capture|loopback    escalating diagnostics, output VISIBLE

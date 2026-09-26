@@ -28,6 +28,9 @@ FAILED=()
 ok()   { printf '  ok    %-26s %s\n' "$1" "${2-}"; }
 bad()  { printf '  FAIL  %-26s %s\n' "$1" "${2-}"; FAILED+=("$1: ${2-}"); }
 skip() { printf '  skip  %-26s %s\n' "$1" "${2-}"; }
+# warn: a real future failure that is not one yet. Does NOT set the exit code --
+# a check that cries wolf gets ignored when it matters (the slice-006 lesson).
+warn() { printf '  warn  %-26s %s\n' "$1" "${2-}"; }
 
 echo "=== repo ==="
 ok "root" "$ROOT"
@@ -174,19 +177,69 @@ if [[ -e /usr/local/bin/howdy-ir-pam ]]; then
 else
     bad "installed helper" "/usr/local/bin/howdy-ir-pam missing (face auth cannot trigger the daemon)"
 fi
-if [[ -r /etc/pam.d/sudo ]]; then
-    grep -q 'pam_exec.so seteuid /usr/local/bin/howdy-ir-pam' /etc/pam.d/sudo \
-        && ok "sudo: feeder line" "auth optional + seteuid" \
-        || bad "sudo: feeder line" "missing or missing 'seteuid' (helper runs as uid 1000 and dies silently)"
-    grep -q 'auth.*sufficient.*pam_howdy.so' /etc/pam.d/sudo \
-        && ok "sudo: pam_howdy line" "sufficient (failure falls through to the password)" \
-        || bad "sudo: pam_howdy line" "absent"
-    [[ -f /etc/pam.d/sudo.pre-howdy ]] && ok "sudo: backup" "/etc/pam.d/sudo.pre-howdy" \
-        || bad "sudo: backup" "no .pre-howdy to restore from"
-else
-    skip "sudo: pam lines" "/etc/pam.d/sudo not readable"
-fi
-pacnew=$(ls /etc/pam.d/*.pacnew 2>/dev/null | tr '\n' ' ')
+# Every service carrying face auth, not just sudo (slice 010 #4). The set is
+# {sudo} U {whatever pam.sh reports}, so sudo going missing is still a FAIL
+# rather than quietly dropping out of the loop.
+source "$LIB/pam-policy.sh"
+pam_services=$(printf '%s\n' sudo $(pam_enabled_services) | sort -u)
+for svc in $pam_services; do
+    f=$PAM_DIR/$svc
+    if [[ ! -r $f ]]; then
+        skip "$svc: pam lines" "$f not readable"
+        continue
+    fi
+    grep -q 'pam_exec.so seteuid /usr/local/bin/howdy-ir-pam' "$f" \
+        && ok "$svc: feeder line" "auth optional + seteuid" \
+        || bad "$svc: feeder line" "missing or missing 'seteuid' (helper runs as uid 1000 and dies silently)"
+    if grep -q 'auth.*sufficient.*pam_howdy.so' "$f"; then
+        ok "$svc: pam_howdy line" "sufficient (failure falls through to the password)"
+        # The howdy lines must sit ABOVE the include: Arch's system-auth ends in
+        # [default=die] pam_faillock authfail, so a 'sufficient' below the
+        # include is unreachable after a wrong password.
+        h=$(grep -n 'pam_howdy\.so' "$f" | head -1 | cut -d: -f1)
+        i=$(grep -nE '^auth[[:space:]]+include' "$f" | head -1 | cut -d: -f1)
+        if [[ -n ${i:-} ]]; then
+            [[ $h -lt $i ]] && ok "$svc: ordering" "howdy above 'auth include' (line $h < $i)" \
+                || bad "$svc: ordering" "pam_howdy is BELOW 'auth include' (line $h > $i) -- unreachable after a failed password"
+        fi
+        # The workaround= option is service-local; policy lives in pam-policy.sh.
+        want=$(pam_workaround_for "$svc")
+        got=$(sed -n 's/.*pam_howdy\.so[[:space:]]*//p' "$f" | head -1)
+        [[ ${got:-} == "${want:-}" ]] \
+            && ok "$svc: workaround" "${got:-none (graphical: native is inert, native-input unvalidated)}" \
+            || bad "$svc: workaround" "'${got:-none}' -- policy for $svc is '${want:-none}'"
+    else
+        bad "$svc: pam_howdy line" "absent"
+    fi
+    [[ -f $f.pre-howdy ]] && ok "$svc: backup" "$f.pre-howdy" \
+        || bad "$svc: backup" "no .pre-howdy to restore from"
+    # A package-owned file that is NOT in pacman's backup array gets overwritten
+    # silently on upgrade -- no .pacnew, no warning, face auth just stops. That
+    # is /etc/pam.d/gtklock. Warn while it is still enabled, so the revert is
+    # visible here instead of being discovered weeks later (slice 010).
+    case $(pam_pkg_state "$f") in
+        revert:*) st=$(pam_pkg_state "$f")
+                  warn "$svc: pacman revert risk" "owned by ${st#revert:} and not a backup file -- an upgrade silently restores the stock file; re-run 'pam enable $svc' after one" ;;
+    esac
+done
+# The lockout surface must stay untouched (slice 010 #3). There are no
+# .pre-howdy backups to diff against for these -- we never touched them -- so the
+# invariant is stated positively: none of them carries a howdy line, in either
+# /etc/pam.d or the vendor dir PAM falls back to. pam_workaround_for()'s sibling
+# PAM_NEVER is the list, and `pam enable` refuses them, so this is the check that
+# a hand edit outside the tool did not slip one in.
+dirty=()
+for n in "${PAM_NEVER[@]}"; do
+    for d in "$PAM_DIR" /usr/lib/pam.d; do
+        [[ -r $d/$n ]] || continue
+        grep -qE 'pam_howdy|howdy-ir-pam' "$d/$n" && dirty+=("$d/$n")
+    done
+done
+(( ${#dirty[@]} == 0 )) \
+    && ok "never-touch services clean" "${#PAM_NEVER[@]} checked (login, su, system-auth, other, polkit-1, ...)" \
+    || bad "never-touch services clean" "face auth found on the lockout surface: ${dirty[*]}"
+
+pacnew=$(ls "$PAM_DIR"/*.pacnew 2>/dev/null | tr '\n' ' ')
 [[ -z $pacnew ]] && ok "no .pacnew in pam.d" || bad "no .pacnew in pam.d" "$pacnew"
 if [[ -r /etc/howdy/config.ini ]]; then
     dp=$(sed -n 's/^device_path = //p' /etc/howdy/config.ini)

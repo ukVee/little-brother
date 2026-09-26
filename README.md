@@ -36,6 +36,11 @@ One entry point (`cement-ir`) over a path the kernel does not assemble for us:
   `cement-ir-rt irfaced` (systemd units `irfaced.socket` + `irfaced.service`,
   also in `~/dotfiles/src/system/systemd/irfaced/`). Design:
   `docs/irfaced-design.md`.
+- **`lib/pam-policy.sh`** is the one place `pam` and `doctor` agree on face-auth
+  policy (slice 010): the `PAM_NEVER` lockout surface that `pam enable` refuses,
+  the per-service `workaround=` choice, and how pacman will treat a hand edit to
+  each service file. Two copies of a policy drift, so there is one — the same
+  argument as the dw9719 conditions in slice 008.
 - **`lib/sensor-recover.sh`** is the **fault handler**, not a step. It unbinds
   and rebinds `ov7251` to re-run power-up when the sensor has actually wedged
   (`cement-ir recover`). Until slice 007 it ran in front of *every*
