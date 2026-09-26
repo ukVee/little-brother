@@ -29,7 +29,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::FileTypeExt;
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -501,6 +501,17 @@ pub fn daemon_run() -> std::process::ExitCode {
             feed = None;
             last_activity = Instant::now();
         }
+        // With a feed running, `Feed::drive` above already paced this loop —
+        // it blocks up to TICK_MS inside `with_frame`. With NO feed there is
+        // nothing to block on, and a non-blocking accept() in a bare loop is a
+        // busy-wait: the first deployed daemon burned 1 min 50 s of CPU over a
+        // 2 min 5 s life serving nothing (2026-09-26, D3). On a fanless device
+        // with a thermal-shutdown history that is not a rounding error, and it
+        // falsifies the "at rest nothing runs" claim slice 011's power budget
+        // is built on. So wait on the listener instead of asking it repeatedly.
+        if feed.is_none() {
+            wait_readable(&listener, idle_secs, last_activity);
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 last_activity = Instant::now();
@@ -520,6 +531,29 @@ pub fn daemon_run() -> std::process::ExitCode {
         f.finish(); // signal path: release everything before exiting
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Block until the listener has a connection waiting or the idle deadline
+/// passes, whichever comes first — the idle path's pacing.
+///
+/// The timeout is the time left on the idle budget, so the loop still exits on
+/// schedule without polling for it: a daemon with 118 s left sleeps 118 s, not
+/// 118 s worth of `accept()` calls. `poll` returning `EINTR` is normal here (a
+/// signal arrived) and needs no handling — the caller re-checks `SIGNALLED` at
+/// the top of the next pass.
+fn wait_readable(listener: &UnixListener, idle_secs: u64, last_activity: Instant) {
+    let left = Duration::from_secs(idle_secs).saturating_sub(last_activity.elapsed());
+    if left.is_zero() {
+        return; // the caller's own idle check is about to fire
+    }
+    let timeout_ms = i32::try_from(left.as_millis()).unwrap_or(i32::MAX);
+    let mut pfd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialised pollfd, count 1, and a plain timeout.
+    unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
 }
 
 /// The `cement-ir-rt irfaced trigger` client — what the PAM helper calls.
