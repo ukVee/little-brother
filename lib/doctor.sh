@@ -36,6 +36,27 @@ python3 -c 'import numpy' 2>/dev/null && ok python-numpy || bad python-numpy "mi
 python3 -c 'import cv2' 2>/dev/null && ok python-opencv \
     || bad python-opencv "missing -- the PAM readiness gate cannot pass (pacman -S python-opencv)"
 
+echo "=== runtime core (Rust, slice 013) ==="
+# Installed, never run out of target/ (decision-cement-ir-rust-runtime-core):
+# a `cargo clean` must not be able to break sudo. Nothing on the auth path
+# depends on it yet (slice 004 cuts over), so absent = skip; STALE = bad,
+# same logic as the PAM helper check below.
+RT=/usr/local/bin/cement-ir-rt
+if [[ -x $RT ]]; then
+    if [[ -d $ROOT/crates ]]; then
+        newer=$(find "$ROOT/crates" -name '*.rs' -newer "$RT" -print -quit 2>/dev/null)
+        if [[ -n $newer ]]; then
+            bad "runtime binary" "stale: $(basename "$newer") newer than $RT -- sudo make -C $ROOT install"
+        else
+            ok "runtime binary" "$RT up to date"
+        fi
+    else
+        ok "runtime binary" "$RT (no crates/ in this checkout)"
+    fi
+else
+    skip "runtime binary" "not installed -- sudo make -C $ROOT install"
+fi
+
 echo "=== dw9719 carry (without it NO camera appears) ==="
 loaded=$(cat /sys/module/dw9719/srcversion 2>/dev/null || true)
 dkmsv=$(modinfo -F srcversion dw9719 2>/dev/null || true)

@@ -52,6 +52,7 @@ One entry point (`cement-ir`) over a path the kernel does not assemble for us:
 
 ```
 cement-ir          the only thing you run
+crates/            the Rust runtime core (workspace; build/test/install via `make`)
 lib/               internals; every path derived from the entry point's location
 system/            files that get installed into the system
 docs/              repo-local records that are not garden material
