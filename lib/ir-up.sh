@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Bring the IR capture path up on demand, immediately before capture.
 #
-#   ~/cement-ir/ir-up.sh            # configure the graph
-#   ~/cement-ir/ir-up.sh --capture N OUT.raw
+#   cement-ir up                    # configure the graph
+#   cement-ir up --capture N OUT.raw
 #
 # On-demand by choice: the IR sensor stays unpowered while idle rather than
 # sitting configured from boot.  Needs no sudo — logind's ACL covers /dev/media0
 # and /dev/video2 for the active seat user (the account is NOT in the `video`
 # group; the `+` in `ls -l` is the ACL).
 #
-# This only works once dw9719 actually binds; see cement-ir.sh.  If the entity
-# below is missing, that is the failure — not this script.
+# This only works once dw9719 actually binds; see `cement-ir dkms verify`.  If the
+# entity below is missing, that is the failure — not this script.
 set -euo pipefail
 
 MEDIA=${MEDIA:-/dev/media0}

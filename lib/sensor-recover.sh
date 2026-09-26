@@ -15,15 +15,16 @@
 # rail that powers the sensor. Re-probing the driver re-runs power-up and
 # toggles reset, which is the cheap fix.
 set -uo pipefail
+source "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)/common.sh"
 [[ $EUID -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
 
 DEV_ID=i2c-INT347E:00
 DRV=/sys/bus/i2c/drivers/ov7251
 
 probe() {
-  /home/ukv/cement-ir/ir-up.sh >/dev/null 2>&1 || true
+  "$LIB/ir-up.sh" >/dev/null 2>&1 || true
   local node
-  node=$(/home/ukv/cement-ir/ir-up.sh 2>/dev/null | sed -n 's/^ready: \(\/dev\/video[0-9]*\).*/\1/p')
+  node=$("$LIB/ir-up.sh" 2>/dev/null | sed -n 's/^ready: \(\/dev\/video[0-9]*\).*/\1/p')
   node=${node:-/dev/video2}
   rm -f /tmp/rec.raw
   timeout 12 v4l2-ctl -d "$node" --stream-mmap --stream-count=3 \
@@ -35,11 +36,11 @@ probe() {
 }
 
 echo "=== PMIC state (is a fault latched?) ==="
-python3 /home/ukv/cement-ir/tps68470.py status | sed 's/^/  /'
+python3 "$LIB/tps68470.py" status | sed 's/^/  /'
 echo "  clearing latched GSTAT flags"
-python3 /home/ukv/cement-ir/tps68470.py clearflags | sed 's/^/  /'
+python3 "$LIB/tps68470.py" clearflags | sed 's/^/  /'
 # Make sure the illuminator is not left drawing current.
-python3 /home/ukv/cement-ir/tps68470.py set 0x36 0x00 >/dev/null
+python3 "$LIB/tps68470.py" set 0x36 0x00 >/dev/null
 
 echo
 echo "=== 1. before ==="

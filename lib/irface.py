@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """IR face-capture tooling for the Surface Go 3.
 
-Three modes:
+Reached through the `cement-ir` entry point; the subcommands are the same.
+
   shot   -- one capture at given settings, written as PGM (for tuning)
   sweep  -- a grid of current/gain settings, one PGM each (to pick an operating point)
   feed   -- drive a v4l2loopback device with unpacked 8-bit frames, for Howdy
+  torch  -- light/extinguish/inspect the illuminator, on the verified sequence
 
 Everything here must run as root: the torch lives behind /dev/i2c-2.
 
@@ -37,7 +39,7 @@ R_WLEDC1, R_WLEDC2, R_WLEDCTL = 0x34, 0x35, 0x36
 
 
 def torch_on(steps, tries=4):
-    """steps of 32.5 mA. Sequencing is load-bearing -- see garden note 008.
+    """steps of 32.5 mA. Sequencing is load-bearing -- see garden hardware/notes/005.
 
     The enable is intermittently racy: WLEDCTL reads back 0x01 (MODE=torch,
     EN=0) instead of 0x05, and the emitter stays dark. Measured 3 failures in
@@ -98,8 +100,9 @@ def readback(subdev):
     """Sensor gain/exposure as the hardware actually holds them.
 
     Two different faults both render as a ~18-mean frame: the torch not lighting,
-    and analogue_gain silently reverting to its minimum of 16. Note 007 records
-    the latter wasting a whole dark-room session. Distinguishing them requires
+    and analogue_gain silently reverting to its minimum of 16. Garden
+    hardware/notes/005 records the latter wasting a whole dark-room session
+    (2026-08-21) in full. Distinguishing them requires
     reading state back AFTER the capture, never just setting it before.
     """
     if not subdev:
@@ -304,6 +307,40 @@ def cmd_feed(a):
             print(f"  cap exit={cap.poll()} ff exit={ff.poll()}", file=sys.stderr)
 
 
+def cmd_torch(a):
+    """The illuminator as a command, not a raw register poke.
+
+    This replaces the August ir-wled.sh / iledctl.py probes, which each
+    re-implemented the enable sequence -- and got it wrong before the retry loop
+    above existed. The torch cannot be left latched from here: the hold refreshes
+    MODE inside the 13 s watchdog, and main()'s finally turns it off on every exit
+    path. An emitter left on is invisible, draws current, and 40 s at 130 mA
+    browns out the sensor's own rail (garden hardware/notes/005).
+
+    Slice 005 of the milestone makes this the SOLE owner: hard current and
+    duration caps, and refusing to light with OVP|UVLO already latched.
+    """
+    if a.action == "off":
+        torch_off()
+        print("  torch off")
+        return
+    if a.action == "status":
+        g, ctl = pmic.get(0x01), pmic.get(R_WLEDCTL)
+        print(f"  GSTAT    0x{g:02x}  [{pmic.decode_gstat(g)}]")
+        print(f"  WLEDCTL  0x{ctl:02x}  [{pmic.decode_ctl(ctl)}]")
+        print(f"  WLEDMAXT 0x{pmic.get(R_WLEDMAXT):02x}  "
+              f"WLEDC1 0x{pmic.get(R_WLEDC1):02x}  WLEDC2 0x{pmic.get(R_WLEDC2):02x}")
+        return
+    v = torch_on(a.current)
+    print(f"  torch on: {a.current} x 32.5mA  WLEDCTL=0x{v:02x}  holding {a.hold:.0f}s")
+    end = time.monotonic() + a.hold
+    while time.monotonic() < end:
+        time.sleep(min(6.0, max(0.0, end - time.monotonic())))
+        if time.monotonic() < end:
+            torch_refresh()
+    print(f"  releasing; WLEDCTL=0x{pmic.get(R_WLEDCTL):02x} while lit")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gain", type=int, default=128)   # dlib scored best here
@@ -326,6 +363,11 @@ def main():
     s.add_argument("--device", required=True)
     s.add_argument("--duration", type=float, default=12.0)
     s.add_argument("--fps", type=int, default=15)
+
+    s = sub.add_parser("torch"); s.set_defaults(fn=cmd_torch)
+    s.add_argument("action", choices=["on", "off", "status"])
+    s.add_argument("--hold", type=float, default=10.0,
+                   help="seconds to hold the torch lit; refreshed inside the 13s watchdog")
 
     a = ap.parse_args()
     if os.geteuid() != 0:

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # pam_exec helper: bring the IR feeder up just before pam_howdy.so runs.
 #
+# GENERATED -- do not edit this copy. It is rendered from
+# <repo>/system/howdy-ir-pam.in by `cement-ir pam install-helper`, which
+# substitutes the repo path below. This is the one file in the system that has to
+# name the repo by absolute path (it lives outside the tree, so it cannot resolve
+# it from its own location); everything else derives paths from the entry point.
+# If you move the repo, re-run that command -- `cement-ir doctor` checks it.
+#
 # pam_howdy knows nothing about our feeder, and the ov7251 emits ip3y that
 # OpenCV cannot decode -- so irface.py must be unpacking frames onto
 # /dev/video20 (and driving the illuminator) before Howdy opens the device.
@@ -16,6 +23,8 @@
 # module is given `seteuid`, so without it this script is uid 1000 and cannot
 # write to /var/log -- which silently killed it at line 1 and left no trace of
 # why the camera never came up.
+CEMENT_IR_ROOT=@CEMENT_IR_ROOT@
+
 LOG=/var/log/howdy-ir-pam.log
 if ! { : >>"$LOG"; } 2>/dev/null; then
   LOG=/tmp/howdy-ir-pam.log
@@ -49,12 +58,22 @@ if pgrep -f "irface.py .* feed " >/dev/null 2>&1; then
   exit 0
 fi
 
+# A repo that has moved is the failure this line exists to make loud: before
+# this check, a relocated checkout left the two paths below dangling and face
+# auth just stopped trying the camera -- silently, because this script is
+# `auth optional` and always exits 0.
+if [[ ! -x $CEMENT_IR_ROOT/lib/irface.py ]]; then
+  echo "  STALE HELPER: no repo at $CEMENT_IR_ROOT"
+  echo "  fix: sudo <repo>/cement-ir pam install-helper"
+  exit 0
+fi
+
 # The sensor wedges after most feeder runs (STREAMON EINVAL, I2C EREMOTEIO);
 # rebinding ov7251 clears it. No-op when healthy.
-timeout 25 /home/ukv/cement-ir/sensor-recover.sh >/dev/null 2>&1
+timeout 25 "$CEMENT_IR_ROOT/lib/sensor-recover.sh" >/dev/null 2>&1
 echo "  sensor check rc=$?"
 
-setsid /home/ukv/cement-ir/irface.py --gain 128 --current 1 \
+setsid "$CEMENT_IR_ROOT/lib/irface.py" --gain 128 --current 1 \
     feed --device /dev/video20 --duration 15 --fps 10 >/dev/null 2>&1 &
 echo "  feeder started pid $!"
 

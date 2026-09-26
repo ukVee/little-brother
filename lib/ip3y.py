@@ -5,11 +5,13 @@ IPU3 packs 25 pixels into each 32-byte group as a little-endian bitstream of
 25 x 10 = 250 bits, with the group's top 6 bits as padding.  It is NOT 4 px per
 5 bytes -- and the wrong grouping yields the SAME 832-byte stride and the same
 399360-byte frame, so every arithmetic check still passes and only the picture
-reveals the error.  See garden note 006.
+reveals the error.  See garden `projects/cement-ir/notes/002` (and
+`hardware/notes/001` for the stride arithmetic).
 
-This implementation is verified pixel-for-pixel against the reference Rust
-decoder (ipu3-unpack) by validate_ip3y.py -- do not "optimise" it without
-re-running that.
+This implementation was verified pixel-for-pixel against the reference Rust
+decoder (ipu3-unpack) in August 2026 -- but by a validate_ip3y.py that was never
+saved, so re-verifying means writing that harness again.  Do not "optimise" this
+without doing so.
 """
 import numpy as np
 

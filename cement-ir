@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# cement-ir -- the IR face-auth path on this Surface Go 3, one entry point.
+#
+#   cement-ir doctor                     read-only health check of the whole path
+#   cement-ir up                         configure the media graph (no capture)
+#   cement-ir shot   [--gain N] [...]    one capture -> PGM, for tuning
+#   cement-ir sweep  [--gain N] [...]    current/gain grid -> PGMs
+#   cement-ir feed   --device /dev/videoN   drive the loopback (what PAM uses)
+#   cement-ir torch  on|off|status       the illuminator, on its verified sequence
+#   cement-ir recover                    clear a wedged ov7251 (fault handler)
+#   cement-ir howdy  <howdy args>        run a howdy command with the feeder live
+#   cement-ir pam    enable|disable|status|install-helper|set-device [service]
+#   cement-ir dkms   verify|install      the dw9719 DKMS carry
+#   cement-ir loopback install           persist /dev/video20
+#   cement-ir diag   capture|loopback    escalating diagnostics, output VISIBLE
+#
+# --gain / --exposure / --current may be given anywhere in shot/sweep/feed/torch;
+# they are hoisted in front of the subcommand for irface.py, which takes them as
+# global options.
+#
+# Anything that writes /dev/i2c-2, /etc or a driver's bind file needs root and
+# says so. doctor, up and `pam status` do not.
+#
+# The knowledge behind all of this lives in the garden, not here:
+#   hardware/notes/001 005 006 · os/kernel/notes/003 · users/notes/001
+#   projects/cement-ir/ (commentary + notes) · docs/archaeology.md (this repo)
+set -uo pipefail
+
+SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+source "$(dirname -- "$SELF")/lib/common.sh"
+
+usage() { awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$SELF"; }
+
+cmd=${1:-}
+[[ $# -gt 0 ]] && shift
+
+case $cmd in
+    doctor)     exec bash "$LIB/doctor.sh" "$@" ;;
+    up)         exec bash "$LIB/ir-up.sh" "$@" ;;
+    shot|sweep|feed|torch)
+        need_root "$cmd"
+        # irface.py wants the global options before the subcommand, so split.
+        opts=(); rest=()
+        while (( $# )); do
+            case $1 in
+                --gain|--exposure|--current)
+                    opts+=("$1" "${2:?$1 needs a value}"); shift 2 ;;
+                --gain=*|--exposure=*|--current=*)
+                    opts+=("$1"); shift ;;
+                *)  rest+=("$1"); shift ;;
+            esac
+        done
+        # exec, so the running process really is `irface.py ... feed ...`: the
+        # PAM helper greps for exactly that to spot a feeder another auth
+        # attempt left behind.
+        exec "$LIB/irface.py" "${opts[@]}" "$cmd" "${rest[@]}" ;;
+    recover)    need_root recover; exec bash "$LIB/sensor-recover.sh" "$@" ;;
+    howdy)      exec bash "$LIB/howdy.sh" "$@" ;;
+    pam)        exec bash "$LIB/pam.sh" "$@" ;;
+    dkms)       exec bash "$LIB/dkms.sh" "$@" ;;
+    loopback)   exec bash "$LIB/loopback.sh" "$@" ;;
+    diag)       exec bash "$LIB/diag.sh" "$@" ;;
+    -h|--help|help|"") usage ;;
+    *)          echo "cement-ir: unknown subcommand '$cmd'" >&2; echo >&2; usage >&2; exit 2 ;;
+esac
