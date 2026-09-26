@@ -33,22 +33,13 @@ DURATION=${DURATION:-90}
 have howdy || die "howdy is not installed"
 [[ -e $DEV ]] || die "$DEV missing -- run: sudo $ROOT/cement-ir loopback install"
 
-# The ov7251 wedges after a feeder run often enough that recovering by hand every
-# time is not viable. Symptom: v4l2-ctl exits 0 with zero bytes, STREAMON returns
-# EINVAL, and the sensor stops answering I2C (EREMOTEIO). Unbinding/rebinding the
-# driver re-runs power-up and clears it; it is a no-op when capture already works,
-# so this is cheap. Demoting it from routine step to fault handler is slice 007.
-echo "checking the IR sensor is alive..."
-if ! bash "$LIB/sensor-recover.sh" >/tmp/ir-recover.log 2>&1; then
-  echo "!! the IR sensor is wedged and did not recover. Log:" >&2
-  tail -20 /tmp/ir-recover.log >&2
-  exit 1
-fi
-if grep -q "RECOVERED without reboot" /tmp/ir-recover.log; then
-  echo "  sensor was wedged; recovered by rebinding ov7251"
-else
-  echo "  sensor OK"
-fi
+# NO sensor pre-check here. Until slice 007 this ran sensor-recover.sh -- a
+# rebind -- in front of every enrolment, the same patchwork the PAM helper
+# carried: a fault handler on the happy path, converting a defect into latency
+# and hiding how often it fired. The clean in-process STREAMOFF (slice 006) is
+# why it is not needed; `cement-ir soak 20` is the evidence; and if the sensor
+# IS wedged, the feeder below fails and says so, with the handler one command
+# away. Every rebind that fires is now counted (cement-ir doctor reports it).
 
 FEEDLOG=/tmp/ir-feeder.log
 : > "$FEEDLOG"
@@ -100,7 +91,13 @@ done
 echo
 if [[ $ok -eq 0 ]]; then
   echo "!! the feeder never signaled a frame -- not running howdy." >&2
-  echo "   check: cement-ir doctor." >&2
+  echo "   Its output:" >&2
+  tail -20 "$FEEDLOG" >&2
+  # This is what the pre-auth rebind used to paper over. Diagnose, then point
+  # at the handler -- it is one command, and it gets counted when it fires.
+  echo "   check: sudo $ROOT/cement-ir doctor" >&2
+  echo "   if the sensor is wedged (STREAMON EINVAL / i2c -121 in dmesg):" >&2
+  echo "     sudo $ROOT/cement-ir recover   # the fault handler, no longer a routine step" >&2
   exit 1
 fi
 echo "feeder live on $DEV, signaled ready (torch ${CUR}x32.5mA, gain $GAIN)"

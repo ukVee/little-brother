@@ -27,7 +27,6 @@
 //! 3. STREAMOFF the loopback sink (the consumer);
 //! 4. read the sensor controls back and journal everything.
 
-use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::io::FromRawFd;
@@ -36,10 +35,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use irctl::{fourcc, media, subdev, video};
+use irctl::video;
 use tps68470::bus::Bus;
 use tps68470::torch::{self, Torch};
 
+use crate::capture::{self, Graph};
+use crate::faults;
 use crate::signals;
 
 pub const SOCKET_PATH: &str = "/run/cement-ir/irfaced.sock";
@@ -141,67 +142,6 @@ impl Request {
     }
 }
 
-/// The resolved + configured IR capture path (see `media::find_ir_path`).
-#[derive(Debug)]
-pub struct Graph {
-    pub sensor: String,
-    pub csi2: String,
-    pub video: PathBuf,
-    pub subdev: Option<PathBuf>,
-}
-
-/// Resolve by entity name and configure the graph — the `lib/ir-up.sh`
-/// discipline, in Rust. Never hardcode a node number; see `find_ir_path`.
-fn bring_up(media_path: &Path) -> Result<Graph, String> {
-    let f = File::open(media_path)
-        .map_err(|e| format!("cannot open {}: {e}", media_path.display()))?;
-    media::check_pad_index_api(&f).map_err(|e| e.to_string())?;
-    let topo = media::get_topology(&f).map_err(|e| format!("get topology: {e}"))?;
-    let path = media::find_ir_path(&topo)?;
-
-    // Device nodes come from sysfs (see media::node_name): a V4L2 node's name
-    // number is NOT its char minor.
-    let video_node = node_or_err(path.video, "CIO2 video")?;
-    let subdev_node = match path.subdev {
-        Some(d) => Some(node_or_err(d, "sensor subdev")?),
-        None => None,
-    };
-
-    // Enable the sensor -> CSI-2 link (media-ctl -l ... [1]).
-    media::setup_link(&f, path.sensor_pad, path.csi2_pad, media::LNK_FL_ENABLED)
-        .map_err(|e| format!("enable link {}:0 -> {}:0: {e}", path.sensor, path.csi2))?;
-
-    // Media-bus formats on both pads (media-ctl -V ... fmt:Y10_1X10/640x480).
-    let sdf = File::open(subdev_node.as_ref().unwrap())
-        .map_err(|e| format!("open {}: {e}", subdev_node.as_ref().unwrap()))?;
-    subdev::set_format(&sdf, 0, fourcc::MEDIA_BUS_FMT_Y10_1X10, 640, 480)
-        .map_err(|e| format!("set fmt on {}: {e}", subdev_node.as_ref().unwrap()))?;
-
-    if let Some((maj, min)) = media::subdev_devnode_of(&topo, path.csi2_pad.entity) {
-        if let Some(csd) = media::node_name(maj, min) {
-            let csif = File::open(&csd).map_err(|e| format!("open {csd}: {e}"))?;
-            subdev::set_format(&csif, 0, fourcc::MEDIA_BUS_FMT_Y10_1X10, 640, 480)
-                .map_err(|e| format!("set fmt on {csd}: {e}"))?;
-        }
-    }
-
-    // The CIO2 capture format is set by Stream::start when the feed opens the
-    // node (it picks single-planar vs mplane from VIDIOC_QUERYCAP, like
-    // v4l2-ctl). Nothing to do here — bring_up's job is the media graph.
-
-    Ok(Graph {
-        sensor: path.sensor,
-        csi2: path.csi2,
-        video: PathBuf::from(video_node),
-        subdev: subdev_node.map(PathBuf::from),
-    })
-}
-
-fn node_or_err(dev: (u32, u32), what: &str) -> Result<String, String> {
-    media::node_name(dev.0, dev.1)
-        .ok_or_else(|| format!("could not resolve the {what} node for {dev:?} (sysfs missing?)"))
-}
-
 enum FeedState {
     /// Frames still flowing (or waiting for the next one).
     Running,
@@ -249,10 +189,16 @@ impl Feed {
             "irfaced: request dur={}s steps={} gain={} exposure={}",
             req.duration_secs, req.current_steps, req.gain, req.exposure
         );
-        let graph = match bring_up(media_path) {
+        let graph = match capture::bring_up(media_path) {
             Ok(g) => g,
-            Err(msg) => {
-                fail(&mut client, &msg);
+            Err(e) => {
+                if e.wedged {
+                    // The rebind is a fault handler now (slice 007), so the
+                    // fault has to be visible: counted, and named in the
+                    // journal with the errno that identified it.
+                    faults::record(faults::WEDGE, &format!("bring-up: {}", e.msg));
+                }
+                fail(&mut client, &e.msg);
                 return Err(());
             }
         };
@@ -265,22 +211,8 @@ impl Feed {
 
         // Gain/exposure MUST be set right before capture, every time
         // (analogue_gain reverts to its minimum of 16 -> near-black frames;
-        // the 2026-08-21 trap, garden hardware/notes/005). ir-up.sh warns and
-        // continues if the subdev is unresolvable; keep that behaviour.
-        if let Some(sd) = &graph.subdev {
-            if let Ok(sdf) = File::open(sd) {
-                for (id, name, val) in [
-                    (subdev::CID_ANALOGUE_GAIN, "analogue_gain", req.gain as i32),
-                    (subdev::CID_EXPOSURE, "exposure", req.exposure as i32),
-                ] {
-                    if let Err(e) = subdev::set_ctrl(&sdf, id, val) {
-                        eprintln!("irfaced: WARNING: set {name}={val} failed: {e} (frames may be near-black)");
-                    }
-                }
-            } else {
-                eprintln!("irfaced: WARNING: could not open {}; gain/exposure NOT set", sd.display());
-            }
-        }
+        // the 2026-08-21 trap, garden hardware/notes/005).
+        capture::set_operating_point("irfaced", &graph, req.gain, req.exposure);
 
         let cap = match video::Stream::start(
             graph.video.to_str().unwrap(),
@@ -290,7 +222,14 @@ impl Feed {
         ) {
             Ok(c) => c,
             Err(e) => {
-                fail(&mut client, &format!("capture {}: {e}", graph.video.display()));
+                let msg = format!("capture {}: {e}", graph.video.display());
+                if faults::looks_wedged(&e) {
+                    // STREAMON EINVAL after a torn-down stream: the signature
+                    // (garden hardware/notes/005). Counted, not silently
+                    // rebound.
+                    faults::record(faults::WEDGE, &msg);
+                }
+                fail(&mut client, &msg);
                 return Err(());
             }
         };
@@ -392,58 +331,46 @@ impl Feed {
         match result {
             Ok(_) => FeedState::Running,
             Err(e) => {
-                eprintln!("irfaced: feed error after {} frames: {e}", *frames);
+                let msg = format!("feed error after {} frames: {e}", *frames);
+                eprintln!("irfaced: {msg}");
+                if faults::looks_wedged(&e) {
+                    faults::record(faults::WEDGE, &msg);
+                }
                 self.finish();
                 FeedState::Done
             }
         }
     }
 
-    /// Teardown in the learned order — see the module doc. Never returns an
-    /// error: every step reports its own, and the feed is over either way.
+    /// Teardown in the learned order — `capture::teardown`, the one copy the
+    /// soak also drives (slice 007). Never returns an error: every step
+    /// reports its own, and the feed is over either way.
     fn finish(&mut self) {
-        // 1. Torch out FIRST: the illuminator must not outlive the feed.
-        if let Some(mut t) = self.torch.take() {
-            if let Err(e) = t.off() {
-                eprintln!("irfaced: torch release failed: {e} (the ~13 s hardware watchdog covers this)");
-            } else {
-                eprintln!("irfaced: torch released");
-            }
-        }
-        // 2. Capture STREAMOFF (producer first) — clean, in-process, nothing
-        //    killed mid-DQBUF (the wedge never happens; STREAMON stays valid).
-        if let Err(e) = self.cap.stop() {
-            eprintln!("irfaced: capture STREAMOFF: {e}");
-        }
-        // 3. Loopback STREAMOFF (consumer).
-        if let Err(e) = self.sink.stop() {
-            eprintln!("irfaced: loopback STREAMOFF: {e}");
-        }
-        // 4. Read the controls back — two faults render identically as a
-        //    ~18-mean frame (torch off vs gain reverted to 16); the readback
-        //    is what tells them apart (garden hardware/notes/005).
-        let mut rb = String::from("gain/exposure readback skipped (no subdev)");
-        if let Some(sd) = &self.graph.subdev {
-            if let Ok(sdf) = File::open(sd) {
-                let g = subdev::get_ctrl(&sdf, subdev::CID_ANALOGUE_GAIN).map(|v| v.to_string());
-                let x = subdev::get_ctrl(&sdf, subdev::CID_EXPOSURE).map(|v| v.to_string());
-                rb = format!(
-                    "gain={} exposure={}",
-                    g.as_deref().unwrap_or("?"),
-                    x.as_deref().unwrap_or("?")
-                );
-            }
-        }
-        let dur = self.req.duration_secs;
+        let torch = self.torch.take();
+        let t = capture::teardown("irfaced", torch, &mut self.cap, Some(&mut self.sink), &self.graph);
         eprintln!(
-            "irfaced: fed {} frames from {} ({} -> {}); {rb}; dur={}s steps={}",
+            "irfaced: fed {} frames from {} ({} -> {}); {}; dur={}s steps={}",
             self.frames,
             self.graph.video.display(),
             self.graph.sensor,
             self.graph.csi2,
-            dur,
+            t.readback.describe(),
+            self.req.duration_secs,
             self.req.current_steps
         );
+        // A feed that streamed nothing, or one whose teardown did not come
+        // apart cleanly, is the wedge showing up on the auth path itself. The
+        // rebind no longer runs here (that is the slice), so the fault rate is
+        // the evidence: `cement-ir doctor` reports it.
+        if self.frames == 0 {
+            faults::record(
+                faults::WEDGE,
+                &format!("fed 0 frames in {}s", self.req.duration_secs),
+            );
+        }
+        if !t.errors.is_empty() {
+            faults::record(faults::WEDGE, &format!("teardown: {}", t.errors.join("; ")));
+        }
     }
 }
 
@@ -644,7 +571,7 @@ pub fn trigger_run(
 /// result, do not stream. The verification surface for the by-name resolution
 /// (mirrors `cement-ir up`'s output).
 pub fn resolve_run(media_path: &str) -> std::process::ExitCode {
-    match bring_up(Path::new(media_path)) {
+    match capture::bring_up(Path::new(media_path)) {
         Ok(g) => {
             println!("sensor: {}  ->  {}", g.sensor, g.csi2);
             println!("ready: {} (ip3y 640x480)", g.video.display());
@@ -654,8 +581,8 @@ pub fn resolve_run(media_path: &str) -> std::process::ExitCode {
             }
             std::process::ExitCode::SUCCESS
         }
-        Err(msg) => {
-            eprintln!("cement-ir-rt: {msg}");
+        Err(e) => {
+            eprintln!("cement-ir-rt: {}", e.msg);
             std::process::ExitCode::FAILURE
         }
     }

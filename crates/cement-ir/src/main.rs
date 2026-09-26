@@ -24,6 +24,8 @@
 //!   calls); always exits 0.
 //! - `irfaced resolve` — resolve + configure the graph by entity name and
 //!   print it, without streaming (diagnostic).
+//! - `soak N` — run N full capture cycles back to back and report wedges,
+//!   recoveries and zero-frame cycles (slice 007; see `soak.rs`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,8 +34,11 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
+mod capture;
+mod faults;
 mod irfaced;
 mod signals;
+mod soak;
 
 use tps68470::bus::Bus;
 use tps68470::torch::{self, Torch};
@@ -63,6 +68,48 @@ enum Cmd {
     Irfaced {
         #[command(subcommand)]
         cmd: IrfacedCmd,
+    },
+    /// Run N full capture cycles back to back and prove the sensor does not
+    /// wedge (slice 007). Exits non-zero if any cycle wedged or needed a
+    /// recovery. `cement-ir soak 20` is the slice's bar.
+    ///
+    /// The illuminator (steps >= 1) and the PMIC state checks need root
+    /// (/dev/i2c-2); `--steps 0` soaks the capture + teardown path alone and
+    /// runs unprivileged, reporting the gap rather than guessing.
+    Soak {
+        /// how many cycles to run (20 is the slice's bar)
+        #[arg(default_value_t = 20)]
+        cycles: u32,
+        /// torch current in 32.5 mA steps (0 = no illuminator; 1 = production)
+        #[arg(long, default_value_t = irfaced::DEFAULT_STEPS)]
+        steps: u8,
+        /// capture seconds per cycle — the transitions matter, not the seconds
+        #[arg(long, default_value_t = soak::DEFAULT_CYCLE_SECS)]
+        duration: u64,
+        /// sensor analogue_gain (the production operating point is 128)
+        #[arg(long, default_value_t = irfaced::DEFAULT_GAIN)]
+        gain: u16,
+        /// sensor exposure
+        #[arg(long, default_value_t = irfaced::DEFAULT_EXPOSURE)]
+        exposure: u32,
+        /// the media device
+        #[arg(long, default_value = "/dev/media0")]
+        media: String,
+        /// also republish frames to this loopback (the full production path)
+        #[arg(long)]
+        loopback: Option<String>,
+        /// the fault handler to run after a wedged cycle (the shell entry
+        /// point passes lib/sensor-recover.sh; this binary knows no repo path).
+        /// Repeatable, last wins — the entry point passes its own first so an
+        /// explicit one from the caller overrides it instead of erroring.
+        #[arg(long, overrides_with = "recover_cmd")]
+        recover_cmd: Option<String>,
+        /// settle time between cycles, ms — the rails come down in between
+        #[arg(long, default_value_t = soak::DEFAULT_SETTLE_MS)]
+        settle_ms: u64,
+        /// minimum frames a cycle must produce to count as passing
+        #[arg(long, default_value_t = 1)]
+        min_frames: u32,
     },
 }
 
@@ -170,6 +217,29 @@ fn main() -> ExitCode {
             }
             IrfacedCmd::Resolve { media } => irfaced::resolve_run(&media),
         },
+        Cmd::Soak {
+            cycles,
+            steps,
+            duration,
+            gain,
+            exposure,
+            media,
+            loopback,
+            recover_cmd,
+            settle_ms,
+            min_frames,
+        } => soak::soak_run(soak::Opts {
+            cycles,
+            steps,
+            duration,
+            gain,
+            exposure,
+            media,
+            loopback,
+            recover_cmd,
+            settle_ms,
+            min_frames,
+        }),
     }
 }
 

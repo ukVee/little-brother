@@ -36,6 +36,18 @@ One entry point (`cement-ir`) over a path the kernel does not assemble for us:
   `cement-ir-rt irfaced` (systemd units `irfaced.socket` + `irfaced.service`,
   also in `~/dotfiles/src/system/systemd/irfaced/`). Design:
   `docs/irfaced-design.md`.
+- **`lib/sensor-recover.sh`** is the **fault handler**, not a step. It unbinds
+  and rebinds `ov7251` to re-run power-up when the sensor has actually wedged
+  (`cement-ir recover`). Until slice 007 it ran in front of *every*
+  authentication attempt with a 25 s timeout — a recovery routine on the happy
+  path, which turns a defect into latency and hides how often it fires. It now
+  runs only after a failure, every rebind is counted in `/run/cement-ir-faults`
+  (tmpfs, since boot), and `cement-ir doctor` reports the rate.
+- **`cement-ir soak N`** is the evidence for that demotion: N full capture
+  cycles back to back at the production operating point, through the same code
+  the daemon runs, checking after each one that the sensor still answers I2C,
+  that `GSTAT` has no new `OVP|UVLO` latch, and that the torch really went dark.
+  One summary line; non-zero exit if any cycle wedged or needed a recovery.
 
 ## What this is not
 
@@ -71,10 +83,12 @@ docs/              repo-local records that are not garden material
 
 **No file in this repo hardcodes its own install path.** The August tree wrote
 `/home/ukv/cement-ir` into 16 files, so one `mv` of the directory broke face auth
-silently. The single unavoidable exception is the *installed copy* of the PAM
-helper at `/usr/local/bin/howdy-ir-pam`, which lives outside the tree: it gets the
-repo path substituted in at install time, and `cement-ir doctor` fails loudly when
-that path no longer matches this checkout.
+silently. Since slice 006 there is no exception left: the installed PAM helper
+carries no repo path at all (it is a bombadil symlink whose one job is to
+trigger the daemon over a socket), and `cement-ir doctor` checks that the
+installed copy really is that symlink. Where a path *must* cross the boundary
+into the Rust core — the fault handler `cement-ir soak` calls — the shell entry
+point passes it in (`--recover-cmd`), so the binary knows no repo path either.
 
 ## Status
 
@@ -82,6 +96,8 @@ Work in progress under the garden milestone `ir-face-root-cause`. There is **no
 git remote** — that is a deliberate, recorded decision, and the backup call is the
 human's.
 
-Not done yet, and known: the wedge recovery still runs on every auth (slice 007),
-and `cement-ir-rt` is not yet installed to `/usr/local/bin` (deferred check D4 —
-until it runs, the torch falls back to the in-tree build).
+Not done yet, and known: `cement-ir-rt` is not yet installed to `/usr/local/bin`
+(deferred check D4 — until it runs, the torch falls back to the in-tree release
+build), and the socket deployment waits on it. The wedge recovery came off the
+auth path in slices 006/007; the soak that proves it is `cement-ir soak 20`,
+whose run **with the illuminator** needs root and is a deferred check.

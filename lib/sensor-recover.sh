@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Recover a wedged ov7251 without rebooting.
+# Recover a wedged ov7251 without rebooting -- the FAULT HANDLER.
+#
+# Slice 007 demoted this from a routine pre-auth step to a handler: it used to
+# run before every authentication attempt with a 25 s timeout, which turned a
+# defect into latency and hid how often the defect fired. It now runs only
+# after a capture has actually failed (`cement-ir soak`, or a human reading a
+# journal line), and every rebind it performs is COUNTED and logged -- a silent
+# rebind rate is how "works most of the time" persisted for a month.
+# The counter: /run/cement-ir-faults (see crates/cement-ir/src/faults.rs).
 #
 # Symptom: v4l2-ctl exits 0 with zero bytes, VIDIOC_STREAMON returns EINVAL, and
 # dmesg shows:
@@ -49,7 +57,7 @@ fi
 
 echo
 echo "=== 1. before ==="
-probe "before" && { echo "already working"; exit 0; }
+probe "before" && { echo "already working (no rebind needed, nothing counted)"; exit 0; }
 
 echo
 echo "=== 2. unbind + rebind ov7251 (re-runs power-up and reset) ==="
@@ -57,10 +65,13 @@ if [[ -e $DRV/$DEV_ID ]]; then
   echo -n "$DEV_ID" > "$DRV/unbind" 2>&1 && echo "  unbound" || echo "  unbind failed"
   sleep 2
   echo -n "$DEV_ID" > "$DRV/bind" 2>&1 && echo "  rebound" || echo "  bind failed"
+  # Counted at the point the rebind actually happens -- the one place it does.
+  fault_bump recover "rebound $DEV_ID on $DRV (capture had failed)"
   sleep 3
 else
   echo "  $DEV_ID not bound to ov7251 (already unbound?)"
   echo -n "$DEV_ID" > "$DRV/bind" 2>/dev/null && echo "  bound" || echo "  bind failed"
+  fault_bump recover "bound $DEV_ID on $DRV (it was not bound at all)"
   sleep 3
 fi
 dmesg | grep -iE "ov7251" | tail -4 | sed 's/^/  /'

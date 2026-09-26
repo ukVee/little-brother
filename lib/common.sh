@@ -27,13 +27,45 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # in-tree release build stands in so the path keeps working. Every torch
 # call in every script goes through this -- nothing else writes a PMIC
 # register.
+# The workspace target dir is crates/target/, NOT crates/<crate>/target/ --
+# the old path here never existed, so before `make install` every caller
+# silently got "no torch owner": sensor-recover.sh could not read the PMIC and
+# howdy.sh's belt-and-braces `torch off` on exit quietly did nothing. Found
+# and fixed in slice 007.
 rt_binary() {
     if have cement-ir-rt; then
         command -v cement-ir-rt
         return
     fi
-    local cand="$ROOT/crates/cement-ir/target/release/cement-ir-rt"
+    local cand="$ROOT/crates/target/release/cement-ir-rt"
     [[ -x $cand ]] && echo "$cand"
+}
+
+# The fault counters (slice 007): tmpfs, since boot, world-readable,
+# root-written. Bumped by sensor-recover.sh (recover) and by cement-ir-rt
+# (wedge); reported by doctor. See crates/cement-ir/src/faults.rs.
+# CEMENT_IR_FAULTS overrides it in both halves (crates/cement-ir/src/faults.rs
+# reads the same variable) so the shell-writes/Rust-reads round trip is testable.
+FAULTS=${CEMENT_IR_FAULTS:-/run/cement-ir-faults}
+
+fault_count() {   # fault_count <key> -> N (0 when the file or key is absent)
+    local n
+    n=$(awk -v k="${1:?}" '$1 == k { print $2 }' "$FAULTS" 2>/dev/null | tail -1)
+    echo "${n:-0}"
+}
+
+# Bump a counter. Root-only (/run), atomic through a temp file + mv, and loud:
+# a fault is an event now, not a silent step.
+fault_bump() {    # fault_bump <key> <reason>
+    local key=${1:?} reason=${2-} n
+    n=$(( $(fault_count "$key") + 1 ))
+    local tmp="$FAULTS.$$"
+    { awk -v k="$key" '$1 != k { print }' "$FAULTS" 2>/dev/null; echo "$key $n"; } > "$tmp" \
+        && mv -f "$tmp" "$FAULTS" && chmod 644 "$FAULTS" \
+        || { rm -f "$tmp"; echo "cement-ir: WARNING: cannot record the $key fault in $FAULTS" >&2; }
+    echo "cement-ir: FAULT $key #$n since boot: $reason" >&2
+    have logger && logger -t cement-ir "FAULT $key #$n since boot: $reason"
+    return 0
 }
 
 # The media graph renumbers across boots, so everything is resolved by entity

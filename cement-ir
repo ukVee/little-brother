@@ -8,6 +8,7 @@
 #   cement-ir feed   --device /dev/videoN   drive the loopback (what PAM uses)
 #   cement-ir torch  on|off|status       the illuminator, on its verified sequence
 #   cement-ir recover                    clear a wedged ov7251 (fault handler)
+#   cement-ir soak   [N] [--steps N] [...]  N capture cycles: prove no wedge
 #   cement-ir howdy  <howdy args>        run a howdy command with the feeder live
 #   cement-ir pam    enable|disable|status|install-helper|set-device [service]
 #   cement-ir dkms   verify|install      the dw9719 DKMS carry
@@ -56,6 +57,16 @@ case $cmd in
         # enrolment path still spawns this feeder directly).
         exec "$LIB/irface.py" "${opts[@]}" "$cmd" "${rest[@]}" ;;
     recover)    need_root recover; exec bash "$LIB/sensor-recover.sh" "$@" ;;
+    soak)
+        # The wedge soak (slice 007). The Rust core drives the cycles; the
+        # fault handler it calls after a wedged cycle is passed IN, because
+        # nothing in the repo may hardcode its own install path -- and the
+        # binary must not know one.
+        RT=$(rt_binary) || true
+        [[ -n ${RT:-} ]] || die "cement-ir-rt not found -- sudo make -C $ROOT install (or make build)"
+        # --recover-cmd goes FIRST so an explicit one from the caller (clap
+        # takes the last occurrence) still wins.
+        exec "$RT" soak --recover-cmd "$LIB/sensor-recover.sh" "$@" ;;
     howdy)      exec bash "$LIB/howdy.sh" "$@" ;;
     pam)        exec bash "$LIB/pam.sh" "$@" ;;
     dkms)       exec bash "$LIB/dkms.sh" "$@" ;;

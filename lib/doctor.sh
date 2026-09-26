@@ -149,6 +149,11 @@ if [[ -e /usr/local/bin/howdy-ir-pam ]]; then
         real=$(readlink -f /usr/local/bin/howdy-ir-pam)
         if [[ $real == "$HOME"/dotfiles/.dots/* ]] && grep -q 'cement-ir-rt irfaced trigger' /usr/local/bin/howdy-ir-pam; then
             ok "installed helper" "bombadil-managed ($real)"
+            # Slice 007: the rebind is a fault handler, never a pre-auth step.
+            # This is the grep that keeps it that way.
+            grep -qE 'sensor-recover|/(un)?bind' /usr/local/bin/howdy-ir-pam \
+                && bad "helper has no rebind" "the installed helper still recovers on the happy path" \
+                || ok "helper has no rebind" "no recovery on the pre-auth path"
         else
             bad "installed helper" "not the bombadil helper ($real) -- run: bombadil link"
         fi
@@ -190,6 +195,38 @@ if [[ -r /var/log/howdy-ir-pam.log ]]; then
     tail -4 /var/log/howdy-ir-pam.log | sed 's/^/  /'
 else
     skip "howdy-ir-pam.log" "not readable"
+fi
+fi
+
+if (( ! QUICK )); then
+echo "=== fault rate (since boot) ==="
+# Slice 007: the ov7251 rebind is a fault handler now, not a routine step, so
+# how often it fires is the number that matters. The counters live in tmpfs
+# ($FAULTS), are bumped by sensor-recover.sh (recover) and cement-ir-rt
+# (wedge), and reset at boot -- so a non-zero count is a fault THIS boot.
+rec=$(fault_count recover); wed=$(fault_count wedge)
+if [[ ! -e $FAULTS ]]; then
+    ok "wedges since boot" "0 (no fault has been recorded)"
+    ok "recoveries since boot" "0 (the rebind has not fired)"
+else
+    [[ $wed -eq 0 ]] && ok "wedges since boot" "0" \
+        || bad "wedges since boot" "$wed -- journalctl -t cement-ir -u irfaced (grep FAULT)"
+    [[ $rec -eq 0 ]] && ok "recoveries since boot" "0 (the rebind has not fired)" \
+        || bad "recoveries since boot" "$rec rebind(s) -- the wedge is back; see $FAULTS"
+fi
+# The demotion itself, machine-checked: nothing the auth path runs may CALL
+# the handler. Comment lines are excluded on purpose -- the files explain the
+# demotion, and a check that fails on its own documentation is noise.
+# (`cement-ir soak` and `cement-ir recover` do call it; they are not the path.)
+callers=()
+for p in "$LIB/pam.sh" "$LIB/howdy.sh" "$LIB/irface.py"; do
+    [[ -r $p ]] || continue
+    grep -vE '^[[:space:]]*#' "$p" | grep -q 'sensor-recover' && callers+=("$(basename "$p")")
+done
+if (( ${#callers[@]} )); then
+    bad "no rebind on the auth path" "${callers[*]} still call sensor-recover.sh"
+else
+    ok "no rebind on the auth path" "pam.sh / howdy.sh / irface.py are clean"
 fi
 fi
 
