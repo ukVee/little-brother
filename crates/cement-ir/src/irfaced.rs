@@ -248,7 +248,27 @@ impl Feed {
         // like cmd_feed's sys.exit did (dark frames are worse than a
         // password fallthrough with a reason).
         let torch = if req.current_steps > 0 {
-            match Bus::open().and_then(|bus| Torch::on(bus, req.current_steps, 4).map_err(io::Error::other))
+            match Bus::open()
+                .and_then(|bus| {
+                    // A latch left by an abnormal exit would otherwise refuse
+                    // every future auth forever (the pre-check runs before any
+                    // release, so nothing ever clears it). Clear a STALE one
+                    // here, once; a live fault returns immediately and the
+                    // owner's own pre-check below still refuses it.
+                    match torch::clear_stale_latch(&bus) {
+                        torch::StaleLatch::None => {}
+                        torch::StaleLatch::Cleared { was } => eprintln!(
+                            "irfaced: cleared a stale GSTAT latch (0x{was:02x}) left by an earlier abnormal exit -- lighting anyway; a live fault would have come straight back"
+                        ),
+                        torch::StaleLatch::Live { gstat } => eprintln!(
+                            "irfaced: GSTAT 0x{gstat:02x} survived a clear -- the fault is LIVE, refusing"
+                        ),
+                        torch::StaleLatch::Error(e) => {
+                            eprintln!("irfaced: stale-latch check failed: {e}")
+                        }
+                    }
+                    Torch::on(bus, req.current_steps, 4).map_err(io::Error::other)
+                })
             {
                 Ok(t) => Some(t),
                 Err(e) => {

@@ -189,6 +189,54 @@ pub fn post_release(bus: &Bus) -> PostRelease {
     }
 }
 
+/// What [`clear_stale_latch`] found.
+#[derive(Debug)]
+pub enum StaleLatch {
+    /// `GSTAT` was clean; nothing to do.
+    None,
+    /// A latch was present and one write-1-to-clear cleared it. No normal
+    /// release leaves one (see [`post_release`]), so this is the trace of an
+    /// abnormal exit — a SIGKILL mid-hold, a crash, or a binary swapped out
+    /// under a warm daemon.
+    Cleared { was: u8 },
+    /// The bits came straight back after the clear: the fault is LIVE, the
+    /// rail really is in trouble, and lighting stays refused.
+    Live { gstat: u8 },
+    /// The check itself could not run — fail closed, let the pre-check refuse.
+    Error(String),
+}
+
+/// Clear a *stale* power-fault latch, once, and prove it was stale.
+///
+/// [`check_gstat`] refuses on latched bits, which is right: they are the
+/// signature of a browned-out rail. But the bits are write-1-to-clear and
+/// nothing clears them on their own, so a single abnormal exit makes the
+/// refusal an **absorbing state** — every later attempt is refused *before*
+/// lighting, so no release happens, so [`post_release`] never runs, so the
+/// latch stands forever and face auth is dead until a human runs a root
+/// command. Observed end to end on 2026-09-26: four consecutive auths refused
+/// on one latch left by a daemon that had been superseded mid-feed.
+///
+/// This is the bounded escape hatch, and it gives up nothing: clearing a
+/// status register lights nothing. If the fault is live the bits return
+/// immediately and the caller's pre-check refuses exactly as before. The
+/// caller decides whether to use it — the CLI stays strict so that a human
+/// asking for the torch by hand still gets the diagnostic refusal.
+pub fn clear_stale_latch(bus: &Bus) -> StaleLatch {
+    let before = match bus.get(regs::GSTAT) {
+        Ok(g) => g,
+        Err(e) => return StaleLatch::Error(e.to_string()),
+    };
+    if before & GSTAT_BLOCK_LIGHT == 0 {
+        return StaleLatch::None;
+    }
+    match clear_gstat(bus) {
+        Ok(after) if after & GSTAT_BLOCK_LIGHT == 0 => StaleLatch::Cleared { was: before },
+        Ok(after) => StaleLatch::Live { gstat: after },
+        Err(e) => StaleLatch::Error(format!("clear failed: {e}")),
+    }
+}
+
 pub struct Torch {
     bus: Bus,
     steps: u8,
