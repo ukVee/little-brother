@@ -1,0 +1,8 @@
+[package]
+name = "tps68470"
+description = "TPS68470 PMIC register access over raw /dev/i2c-2 (I2C_SLAVE_FORCE) + decoders + the Torch guard. Dep budget: libc only."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = "0.2"

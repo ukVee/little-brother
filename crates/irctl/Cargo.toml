@@ -1,0 +1,7 @@
+[package]
+name = "irctl"
+description = "V4L2 + media-controller ioctls: graph, capture, loopback sink. Stub in slice 013; the typed wrappers land with the feed loop (slice 004)."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["ip3y", "tps68470", "irctl", "cement-ir"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Fanless i3-10100Y with a history of EC-level hard resets under sustained
+# load (hardware/notes/002) — keep release builds lean. No LTO games here;
+# the dependency budget is the real defence (see each crate's manifest).
+[profile.release]
+strip = true

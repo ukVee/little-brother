@@ -1,0 +1,7 @@
+[package]
+name = "ip3y"
+description = "Pure IPU3 'ip3y' 10-bit unpack — byte-identical to lib/ip3y.py on a committed golden frame. No I/O, no deps."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

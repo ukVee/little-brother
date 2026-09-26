@@ -1,0 +1,19 @@
+[package]
+name = "cement-ir"
+description = "cement-ir-rt — the Rust runtime core of the IR face-auth path (skeleton: torch guard + ip3y unpack). Dep budget: clap + libc, no async runtime."
+version.workspace = true
+edition.workspace = true
+
+# The binary target is deliberately NOT named `cement-ir`: the repo root's
+# shell `cement-ir` entry point keeps that name as the single surface. The
+# installed runtime binary is `cement-ir-rt` (/usr/local/bin per the
+# 2026-09-26 decision).
+[[bin]]
+name = "cement-ir-rt"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ip3y = { path = "../ip3y" }
+tps68470 = { path = "../tps68470" }
+libc = "0.2"
