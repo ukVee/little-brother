@@ -138,7 +138,8 @@ fi
 # check that cries wolf over one gets ignored when it matters. The source of
 # truth moved to ~/dotfiles with slice 006 (bombadil-sourced).
 effective() { grep -vE '^\s*(#|$)' "$1" 2>/dev/null; }
-DOTS_SYSTEM="$HOME/dotfiles/src/system"
+DOTS_HOME=$(real_home)
+DOTS_SYSTEM="$DOTS_HOME/dotfiles/src/system"
 for f in /etc/modprobe.d/v4l2loopback.conf /etc/modules-load.d/v4l2loopback.conf; do
     if [[ -f $f ]]; then
         if diff -q <(effective "$f") <(effective "$DOTS_SYSTEM/${f#/etc/}") >/dev/null; then
@@ -165,7 +166,7 @@ if [[ -e /usr/local/bin/howdy-ir-pam ]]; then
         # "cement-ir-rt irfaced trigger" is never in it -- this grep FAILed a
         # correct bombadil deploy on 2026-09-26. Assert what is really there:
         # the installed path it resolves, and the trigger it issues.
-        if [[ $real == "$HOME"/dotfiles/.dots/* ]] \
+        if [[ $real == "$DOTS_HOME"/dotfiles/.dots/* ]] \
            && grep -q '^RT=/usr/local/bin/cement-ir-rt$' /usr/local/bin/howdy-ir-pam \
            && grep -q 'irfaced trigger' /usr/local/bin/howdy-ir-pam; then
             ok "installed helper" "bombadil-managed ($real)"
@@ -251,9 +252,14 @@ if [[ -r /etc/howdy/config.ini ]]; then
     dp=$(sed -n 's/^device_path = //p' /etc/howdy/config.ini)
     [[ $dp == /dev/video20 ]] && ok "howdy device_path" "$dp" \
         || bad "howdy device_path" "'${dp:-unset}' -- want /dev/video20 (sudo $ROOT/cement-ir pam set-device)"
-    models=$(ls /etc/howdy/models/ukv/*.dat 2>/dev/null | wc -l)
-    [[ ${models:-0} -ge 1 ]] && ok "howdy model for ukv" "$models" \
-        || bad "howdy model for ukv" "0 enrolled models -- sudo $ROOT/cement-ir howdy add"
+    # The invoking human, not a hardcoded name -- and howdy's layout is not
+    # assumed: count BOTH <user>.dat and <user>/*.dat. The hardcoded
+    # `models/ukv/*.dat` reported "0 enrolled models" on a machine that had
+    # just authenticated by face six times (2026-09-26).
+    u=$(real_user)
+    models=$( { ls "/etc/howdy/models/$u".dat; ls "/etc/howdy/models/$u"/*.dat; } 2>/dev/null | wc -l )
+    [[ ${models:-0} -ge 1 ]] && ok "howdy model for $u" "$models" \
+        || bad "howdy model for $u" "0 enrolled models under /etc/howdy/models -- sudo $ROOT/cement-ir howdy add"
 else
     skip "howdy device_path" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
 fi

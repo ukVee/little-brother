@@ -89,7 +89,7 @@ cmd_status() {
         if [[ -L $HELPER ]]; then
             real=$(readlink -f "$HELPER")
             case $real in
-                "$HOME"/dotfiles/.dots/*)
+                "$(real_home)"/dotfiles/.dots/*)
                     grep -q 'cement-ir-rt irfaced trigger' "$HELPER" \
                         && echo "  $HELPER -> $real (bombadil-managed)" \
                         || echo "  !! $HELPER does not carry the trigger call -- bombadil link"

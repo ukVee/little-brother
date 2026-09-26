@@ -16,6 +16,22 @@ SYSTEM="$ROOT/system"
 
 die() { echo "cement-ir: $*" >&2; exit 1; }
 
+# The human this machine belongs to, and their home -- NOT $USER/$HOME, which
+# under `sudo` are root and /root. Half of `cement-ir doctor`'s checks compare
+# against ~/dotfiles, so reading $HOME made `sudo doctor` look for
+# /root/dotfiles and report three healthy things as broken (2026-09-26). A
+# health tool whose answer depends on how it was invoked is worse than no
+# health tool, so every dotfiles-relative path goes through these.
+real_user() {
+    printf '%s\n' "${SUDO_USER:-${USER:-$(id -un)}}"
+}
+
+real_home() {
+    local u; u=$(real_user)
+    local h; h=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
+    printf '%s\n' "${h:-$HOME}"
+}
+
 need_root() {   # need_root <subcommand>
     [[ $EUID -eq 0 ]] || die "'${1:-this}' needs root:  sudo $ROOT/cement-ir ${1:-...} ..."
 }
