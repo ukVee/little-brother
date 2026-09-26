@@ -121,33 +121,42 @@ else
     bad "/dev/video20" "absent -- sudo $ROOT/cement-ir loopback install"
 fi
 # Compare the EFFECTIVE lines only -- a reworded comment is not a drift, and a
-# check that cries wolf over one gets ignored when it matters.
+# check that cries wolf over one gets ignored when it matters. The source of
+# truth moved to ~/dotfiles with slice 006 (bombadil-sourced).
 effective() { grep -vE '^\s*(#|$)' "$1" 2>/dev/null; }
+DOTS_SYSTEM="$HOME/dotfiles/src/system"
 for f in /etc/modprobe.d/v4l2loopback.conf /etc/modules-load.d/v4l2loopback.conf; do
     if [[ -f $f ]]; then
-        if diff -q <(effective "$f") <(effective "$SYSTEM/${f#/etc/}") >/dev/null; then
-            ok "${f#/etc/}" "matches the repo"
+        if diff -q <(effective "$f") <(effective "$DOTS_SYSTEM/${f#/etc/}") >/dev/null; then
+            ok "${f#/etc/}" "matches ~/dotfiles"
         else
-            bad "${f#/etc/}" "differs from $SYSTEM/${f#/etc/} -- sudo $ROOT/cement-ir loopback install"
+            bad "${f#/etc/}" "differs from $DOTS_SYSTEM/${f#/etc/} -- bombadil link"
         fi
     else
-        bad "${f#/etc/}" "not installed"
+        bad "${f#/etc/}" "not installed -- bombadil link"
     fi
 done
 
 if (( ! QUICK )); then
 echo "=== PAM ==="
-if [[ -f /usr/local/bin/howdy-ir-pam ]]; then
-    hr=$(sed -n 's#^CEMENT_IR_ROOT=\(.*\)$#\1#p' /usr/local/bin/howdy-ir-pam | head -1)
-    if [[ -z $hr ]]; then
-        bad "installed helper" "pre-move copy with a hardcoded path -- sudo $ROOT/cement-ir pam install-helper"
-    elif [[ $hr == "$ROOT" ]]; then
-        ok "installed helper" "points at $hr"
+# The helper is bombadil-sourced since slice 006: /usr/local/bin/howdy-ir-pam
+# is a symlink into ~/dotfiles/.dots/ carrying the trigger call. There is no
+# baked-in repo path anymore, so there is nothing to go stale -- but the
+# pre-slice-006 copies (hand-installed, hardcoded path) are still out there
+# and must be caught until D2 deploys the new helper.
+if [[ -e /usr/local/bin/howdy-ir-pam ]]; then
+    if [[ -L /usr/local/bin/howdy-ir-pam ]]; then
+        real=$(readlink -f /usr/local/bin/howdy-ir-pam)
+        if [[ $real == "$HOME"/dotfiles/.dots/* ]] && grep -q 'cement-ir-rt irfaced trigger' /usr/local/bin/howdy-ir-pam; then
+            ok "installed helper" "bombadil-managed ($real)"
+        else
+            bad "installed helper" "not the bombadil helper ($real) -- run: bombadil link"
+        fi
     else
-        bad "installed helper" "points at $hr, this checkout is $ROOT -- sudo $ROOT/cement-ir pam install-helper"
+        bad "installed helper" "hand-installed copy, not a bombadil symlink -- run: bombadil link"
     fi
 else
-    bad "installed helper" "/usr/local/bin/howdy-ir-pam missing (face auth cannot start the feeder)"
+    bad "installed helper" "/usr/local/bin/howdy-ir-pam missing (face auth cannot trigger the daemon)"
 fi
 if [[ -r /etc/pam.d/sudo ]]; then
     grep -q 'pam_exec.so seteuid /usr/local/bin/howdy-ir-pam' /etc/pam.d/sudo \

@@ -29,9 +29,13 @@ One entry point (`cement-ir`) over a path the kernel does not assemble for us:
 - **`lib/tps68470.py`** *reads* the PMIC that powers the sensor *and* drives the
   emitter over raw i2c — read-only since slice 005, because nothing in Linux
   programs its WLED block and the owner is the only writer.
-- **`system/howdy-ir-pam.in`** is the `pam_exec` helper that starts the feeder
-  just before `pam_howdy.so` runs. It is rendered and installed by
-  `cement-ir pam install-helper`.
+- **The PAM helper** (`/usr/local/bin/howdy-ir-pam`) is the `pam_exec` trigger
+  that asks the on-demand face-capture daemon for a frame stream before
+  `pam_howdy.so` runs. Bombadil-sourced since slice 006 from
+  `~/dotfiles/src/system/cement-ir/howdy-ir-pam`; the daemon it triggers is
+  `cement-ir-rt irfaced` (systemd units `irfaced.socket` + `irfaced.service`,
+  also in `~/dotfiles/src/system/systemd/irfaced/`). Design:
+  `docs/irfaced-design.md`.
 
 ## What this is not
 

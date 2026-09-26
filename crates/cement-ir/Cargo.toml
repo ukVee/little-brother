@@ -1,6 +1,6 @@
 [package]
 name = "cement-ir"
-description = "cement-ir-rt — the Rust runtime core of the IR face-auth path (skeleton: torch guard + ip3y unpack). Dep budget: clap + libc, no async runtime."
+description = "cement-ir-rt — the Rust runtime core of the IR face-auth path (torch owner + ip3y unpack + the irfaced service). Dep budget: clap + libc, no async runtime."
 version.workspace = true
 edition.workspace = true
 
@@ -16,4 +16,5 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 ip3y = { path = "../ip3y" }
 tps68470 = { path = "../tps68470" }
+irctl = { path = "../irctl" }
 libc = "0.2"

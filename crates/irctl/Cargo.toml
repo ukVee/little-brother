@@ -1,7 +1,8 @@
 [package]
 name = "irctl"
-description = "V4L2 + media-controller ioctls: graph, capture, loopback sink. Stub in slice 013; the typed wrappers land with the feed loop (slice 004)."
+description = "V4L2 + media-controller ioctls: graph, capture, loopback sink. Hand-written typed wrappers (ABI ground-truthed against this kernel's UAPI headers); the IPU3 raw-CIO2 path is not what the generic v4l crates target."
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+libc = "0.2"

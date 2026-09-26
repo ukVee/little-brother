@@ -58,6 +58,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ip3y",
+ "irctl",
  "libc",
  "tps68470",
 ]
@@ -121,6 +122,9 @@ version = "0.1.0"
 [[package]]
 name = "irctl"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "is_terminal_polyfill"

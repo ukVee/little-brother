@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cement-ir loopback install -- make the Howdy IR loopback survive reboots with a
-# STABLE node number.
+# STABLE node number, and reload the module so the running system matches.
 #
 # Howdy stores an absolute device_path in its config, so the node must not move.
 # video_nr=20 is well clear of the IPU3's own nodes, which renumbered once during
@@ -9,12 +9,13 @@
 #
 # exclusive_caps=1 makes the node advertise capture capability only while a
 # producer holds it open -- which is what OpenCV wants, but also means the device
-# looks absent whenever the feeder is not running. Do not read an absent
+# looks absent whenever the daemon is not feeding. Do not read an absent
 # /dev/video20 as a broken loopback.
 #
-# The two config files are DATA in this repo (system/), not heredocs, so the
-# installed state can be diffed against the tree. Whether they should be
-# bombadil-sourced instead is slice 006's call.
+# Since slice 006 the two conf files are bombadil-sourced from ~/dotfiles/src/system
+# ({modprobe,modules-load}.d/v4l2loopback.conf); `bombadil link` is the installer
+# and this verb verifies + reloads. (One-time root ACL if bombadil cannot write
+# the targets: sudo setfacl -m u:ukv:rwx /etc/modprobe.d /etc/modules-load.d.)
 set -uo pipefail
 
 source "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)/common.sh"
@@ -25,11 +26,16 @@ case ${1:-install} in
 esac
 need_root loopback
 
-install -m 644 "$SYSTEM/modules-load.d/v4l2loopback.conf" /etc/modules-load.d/v4l2loopback.conf
-install -m 644 "$SYSTEM/modprobe.d/v4l2loopback.conf"     /etc/modprobe.d/v4l2loopback.conf
-echo "installed:"
-echo "  /etc/modules-load.d/v4l2loopback.conf"
-echo "  /etc/modprobe.d/v4l2loopback.conf"
+missing=0
+for f in /etc/modules-load.d/v4l2loopback.conf /etc/modprobe.d/v4l2loopback.conf; do
+    if [[ -f $f ]]; then
+        echo "  ok: $f"
+    else
+        echo "  MISSING: $f -- run: bombadil link"
+        missing=1
+    fi
+done
+(( missing )) && exit 1
 
 # Reload now so the running system matches what a reboot would produce.
 if lsmod | grep -q '^v4l2loopback'; then

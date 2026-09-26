@@ -66,3 +66,10 @@ was not already written down or written down as part of the same change.
 - `irface.py` cited "garden note 008" for the torch sequencing and "note 007" for
   the gain trap; both facts are in `hardware/notes/005`, and the references are
   corrected.
+
+> Slice 006 (2026-09-26) superseded two rows above: `howdy-ir-pam` is now
+> bombadil-sourced from `~/dotfiles/src/system/cement-ir/howdy-ir-pam` (a
+> trigger client, no template, no repo path — `install-helper` was deleted
+> with it), and the two `system/{modprobe,modules-load}.d/v4l2loopback.conf`
+> data files moved to `~/dotfiles/src/system/` the same way. This file keeps
+> the slice-003 record as it was.

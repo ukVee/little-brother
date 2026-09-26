@@ -50,9 +50,10 @@ case $cmd in
                 *)  rest+=("$1"); shift ;;
             esac
         done
-        # exec, so the running process really is `irface.py ... feed ...`: the
-        # PAM helper greps for exactly that to spot a feeder another auth
-        # attempt left behind.
+        # exec, so the running process really is `irface.py ... feed ...` — the
+        # pre-slice-006 helper grep'd for exactly that to spot a feeder another
+        # auth attempt left behind; kept for process identity (and howdy.sh's
+        # enrolment path still spawns this feeder directly).
         exec "$LIB/irface.py" "${opts[@]}" "$cmd" "${rest[@]}" ;;
     recover)    need_root recover; exec bash "$LIB/sensor-recover.sh" "$@" ;;
     howdy)      exec bash "$LIB/howdy.sh" "$@" ;;

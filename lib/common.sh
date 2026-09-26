@@ -6,8 +6,9 @@
 # face auth silently -- the installed PAM helper kept pointing at a path that no
 # longer existed, and because it is `auth optional` and always exits 0, sudo
 # simply stopped trying the camera. Every path below is derived from where this
-# file actually is, so moving the repo again costs nothing except re-running
-# `cement-ir pam install-helper` (the one copy that lives outside the tree).
+# file actually is, so moving the repo again costs nothing. (Since slice 006 the
+# PAM helper is bombadil-sourced and carries no repo path at all; nothing
+# outside this tree hardcodes it.)
 
 ROOT=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
 LIB="$ROOT/lib"

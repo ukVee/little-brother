@@ -4,6 +4,8 @@
 //! 005 this binary (with `crates/tps68470`) is the emitter's **one owner** —
 //! the only code in the repo that writes a PMIC register. `lib/irface.py`,
 //! `howdy.sh`, `diag.sh` and `sensor-recover.sh` are consumers that ask it.
+//! Since slice 006 it also carries `irfaced` — the on-demand face-capture
+//! daemon and its trigger client (see `irfaced.rs`).
 //!
 //! The verbs:
 //! - `torch status` — read back + decode the emitter's PMIC registers
@@ -17,6 +19,11 @@
 //! - `torch off` — extinguish (WLEDCTL = 0).
 //! - `torch clear-flags` — write-1-to-clear the latched GSTAT bits.
 //! - `ip3y unpack` — unpack a 399 360-byte ip3y frame to 16-bit samples.
+//! - `irfaced daemon` — run the socket-activated face-capture service.
+//! - `irfaced trigger` — the one-shot trigger client (what the PAM helper
+//!   calls); always exits 0.
+//! - `irfaced resolve` — resolve + configure the graph by entity name and
+//!   print it, without streaming (diagnostic).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
+mod irfaced;
 mod signals;
 
 use tps68470::bus::Bus;
@@ -49,6 +57,49 @@ enum Cmd {
     Ip3y {
         #[command(subcommand)]
         cmd: Ip3yCmd,
+    },
+    /// The on-demand face-capture service (slice 006) — daemon, trigger
+    /// client, or graph-resolution diagnostic.
+    Irfaced {
+        #[command(subcommand)]
+        cmd: IrfacedCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum IrfacedCmd {
+    /// Run the socket-activated daemon (systemd: irfaced.service). Serves
+    /// frames to the loopback on demand, keeps the graph configured while
+    /// warm, exits after the idle timeout (IRFACED_IDLE_SECS, default 120).
+    Daemon,
+    /// One-shot trigger: connect, ask for a frame stream, wait for the
+    /// readiness reply, print it. Always exits 0 — the PAM helper's contract.
+    Trigger {
+        /// feed duration in seconds (1..=120; the owner's ceiling bounds it)
+        #[arg(long, default_value_t = irfaced::DEFAULT_FEED_SECS)]
+        duration: u32,
+        /// torch current in 32.5 mA steps (0 = no illuminator; 1..=3)
+        #[arg(long, default_value_t = irfaced::DEFAULT_STEPS)]
+        steps: u8,
+        /// sensor analogue_gain (1..=1023; dlib scored best at 128)
+        #[arg(long, default_value_t = irfaced::DEFAULT_GAIN)]
+        gain: u16,
+        /// sensor exposure
+        #[arg(long, default_value_t = irfaced::DEFAULT_EXPOSURE)]
+        exposure: u32,
+        /// how long to wait for the readiness reply before giving up
+        #[arg(long, default_value_t = 5)]
+        timeout: u64,
+        /// the daemon socket (default /run/cement-ir/irfaced.sock)
+        #[arg(long, default_value = irfaced::SOCKET_PATH)]
+        socket: String,
+    },
+    /// Resolve the graph by entity name, configure it, print it — no
+    /// streaming. The verification surface for by-name resolution.
+    Resolve {
+        /// the media device (default /dev/media0)
+        #[arg(long, default_value = "/dev/media0")]
+        media: String,
     },
 }
 
@@ -111,6 +162,13 @@ fn main() -> ExitCode {
         },
         Cmd::Ip3y { cmd } => match cmd {
             Ip3yCmd::Unpack { raw, out } => ip3y_unpack(raw, out),
+        },
+        Cmd::Irfaced { cmd } => match cmd {
+            IrfacedCmd::Daemon => irfaced::daemon_run(),
+            IrfacedCmd::Trigger { duration, steps, gain, exposure, timeout, socket } => {
+                irfaced::trigger_run(duration, steps, gain, exposure, timeout, &socket)
+            }
+            IrfacedCmd::Resolve { media } => irfaced::resolve_run(&media),
         },
     }
 }
