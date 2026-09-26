@@ -36,11 +36,16 @@ probe() {
 }
 
 echo "=== PMIC state (is a fault latched?) ==="
-python3 "$LIB/tps68470.py" status | sed 's/^/  /'
-echo "  clearing latched GSTAT flags"
-python3 "$LIB/tps68470.py" clearflags | sed 's/^/  /'
-# Make sure the illuminator is not left drawing current.
-python3 "$LIB/tps68470.py" set 0x36 0x00 >/dev/null
+RT=$(rt_binary)
+if [[ -n $RT ]]; then
+    "$RT" torch status | sed 's/^/  /'
+    echo "  clearing latched GSTAT flags"
+    "$RT" torch clear-flags | sed 's/^/  /'
+    # Make sure the illuminator is not left drawing current.
+    "$RT" torch off >/dev/null
+else
+    echo "  cement-ir-rt not found -- cannot read or clear the PMIC (sudo make -C $ROOT install)"
+fi
 
 echo
 echo "=== 1. before ==="

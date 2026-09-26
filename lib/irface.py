@@ -6,20 +6,27 @@ Reached through the `cement-ir` entry point; the subcommands are the same.
   shot   -- one capture at given settings, written as PGM (for tuning)
   sweep  -- a grid of current/gain settings, one PGM each (to pick an operating point)
   feed   -- drive a v4l2loopback device with unpacked 8-bit frames, for Howdy
-  torch  -- light/extinguish/inspect the illuminator, on the verified sequence
+  torch  -- light/extinguish/inspect the illuminator, via its one owner (cement-ir-rt)
 
-Everything here must run as root: the torch lives behind /dev/i2c-2.
+Everything here must run as root: the capture graph and the torch owner both
+need it.
 
-The torch is turned OFF in a finally block and on SIGTERM/SIGINT.  That matters
-more than it looks -- an IR emitter left latched is invisible, draws current,
-and 40s at 130mA was enough to raise OVP+UVLO on this PMIC.  'feed' also
-self-terminates after --duration so that a PAM stack which never reaches a
-cleanup line cannot strand the emitter on.
+Since slice 005 this file does NOT write a single PMIC register. The emitter
+has exactly one owner -- `cement-ir-rt` (crates/tps68470) -- which enforces
+the hard current ceiling (3 steps / 97.5 mA), the hard duration ceiling
+(120 s), and the GSTAT pre-check. Every torch here is a `torch hold` child
+with `--parent=<our pid>`, so if THIS process dies (any death, kill -9
+included) the kernel SIGTERMs the holder and the emitter goes dark without
+any of our code running. 'feed' also self-terminates after --duration so
+that a PAM stack which never reaches a cleanup line cannot strand the
+emitter on.
 """
 import argparse
+import math
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -34,48 +41,97 @@ import tps68470 as pmic
 
 IRUP = str(Path(__file__).resolve().parent / "ir-up.sh")
 
-R_WLEDMAXT, R_VWLEDCTL = 0x2D, 0x31
-R_WLEDC1, R_WLEDC2, R_WLEDCTL = 0x34, 0x35, 0x36
+R_WLEDCTL = 0x36
+
+# The holder's own deadline must leave room for the feed deadline plus the
+# capture teardown; the owner refuses anything above its compiled-in
+# duration ceiling (120 s), so a feed that wants more than this fails loudly
+# through the holder's refusal.
+HOLDER_MARGIN_SECS = 5
 
 
-def torch_on(steps, tries=4):
-    """steps of 32.5 mA. Sequencing is load-bearing -- see garden hardware/notes/005.
-
-    The enable is intermittently racy: WLEDCTL reads back 0x01 (MODE=torch,
-    EN=0) instead of 0x05, and the emitter stays dark. Measured 3 failures in
-    16 captures. So verify EN after writing and retry, rather than assuming the
-    write took -- a torch that silently fails during a PAM auth is a failed
-    login, and the frame it produces is indistinguishable from a dark room.
+def rt_binary():
+    """Resolve cement-ir-rt like doctor.sh does: the installed binary wins,
+    else the in-tree release build (so the path works before `make install`
+    has run). The emitter's one owner; every torch call here goes through it.
     """
-    for _ in range(tries):
-        pmic.put(R_WLEDCTL, 0x00)      # MAXT is not writable while enabled
-        time.sleep(0.02)               # let the boost ramp down before MAXT
-        pmic.put(R_WLEDMAXT, steps)
-        pmic.put(R_WLEDC1, steps)
-        pmic.put(R_WLEDC2, steps)
-        pmic.put(R_VWLEDCTL, 0x39)     # reset value | ENABLE
-        pmic.put(R_WLEDCTL, 0x01)      # MODE='01' torch FIRST...
-        time.sleep(0.01)
-        pmic.put(R_WLEDCTL, 0x05)      # ...THEN EN, separate write
-        v = pmic.get(R_WLEDCTL)
-        if v & 0x04:                   # EN actually latched
-            return v
-        time.sleep(0.05)
-    print(f"  WARNING: torch EN never latched (WLEDCTL=0x{v:02x})", file=sys.stderr)
-    return v
+    rt = shutil.which("cement-ir-rt")
+    if rt:
+        return rt
+    cand = str(Path(__file__).resolve().parent.parent
+               / "crates/cement-ir/target/release/cement-ir-rt")
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        print(f"  NOTE: cement-ir-rt not installed; using the in-tree build "
+              f"({cand}) -- sudo make -C <repo> install", file=sys.stderr)
+        return cand
+    raise RuntimeError(
+        "cement-ir-rt not found (installed or built) -- "
+        "sudo make -C ~/projects/cement-ir install")
+
+
+def arm_parent_death():
+    """SIGTERM ourselves when our parent dies -- however it dies, kill -9
+    included. The feeder's consumer (PAM helper / howdy.sh / a shell) is the
+    only thing that wants it alive, so its death must tear the capture and
+    the torch down instead of leaving them running to their deadlines.
+    Returns False if the parent is already gone.
+    """
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        ppid = os.getppid()
+        libc.prctl(1, signal.SIGTERM)      # PR_SET_PDEATHSIG
+        return os.getppid() == ppid
+    except Exception:
+        return True                        # arming failed: behave as before
+
+
+def torch_hold_child(steps, duration):
+    """Light the emitter through the one owner and return the live child.
+
+    Spawns `cement-ir-rt torch hold --steps N --duration S --parent=<pid>`,
+    waits for its first stdout line (the owner prints `torch on: ...` only
+    after EN latched), and returns the Popen. Raises RuntimeError with the
+    owner's own words when it refuses (ceiling / latched GSTAT) or fails.
+    """
+    proc = subprocess.Popen(
+        [rt_binary(), "torch", "hold",
+         f"--steps={int(steps)}", f"--duration={int(duration)}",
+         f"--parent={os.getpid()}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    line = proc.stdout.readline() if proc.stdout else ""
+    if proc.poll() is not None or not line.startswith("torch on:"):
+        err = ""
+        if proc.stderr:
+            err = proc.stderr.read()
+        proc.wait()
+        raise RuntimeError("the torch owner refused or failed: "
+                           + (err.strip() or "no output"))
+    return proc
+
+
+def torch_release(proc):
+    """End the hold: SIGTERM the owner, which releases WLEDCTL on Drop. The
+    ~13 s hardware watchdog covers the case where even that cannot run."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def torch_off():
+    """Belt-and-braces final release through the owner. Never raises."""
     try:
-        pmic.put(R_WLEDCTL, 0x00)
+        rt = rt_binary()
+    except Exception:
+        return
+    try:
+        subprocess.run([rt, "torch", "off"], capture_output=True, timeout=3)
     except Exception:
         pass
-
-
-def torch_refresh():
-    """Torch self-disables after a 13s watchdog unless MODE is refreshed."""
-    pmic.put(R_WLEDCTL, 0x01)
-    pmic.put(R_WLEDCTL, 0x05)
 
 
 def graph_up(gain, exposure):
@@ -160,12 +216,17 @@ def report(tag, frame10, flag=""):
 
 def cmd_shot(a):
     video, subdev = graph_up(a.gain, a.exposure)
-    torch_on(a.current) if a.current else torch_off()
+    hold = None
+    if a.current:
+        hold = torch_hold_child(a.current, 5)
+    else:
+        torch_off()                       # ensure dark before a no-torch capture
     try:
         buf = grab(video, a.frames)
     finally:
-        rb = readback(subdev); wled = pmic.get(R_WLEDCTL)
-        torch_off()
+        rb = readback(subdev)
+        wled = pmic.get(R_WLEDCTL)        # read while the holder is still lit
+        torch_release(hold)
     f = ip3y.frame_at(buf, a.frames - 1)
     report(f"cur={a.current} gain={a.gain} exp={a.exposure}", f)
     write_pgm(a.out, to8(f))
@@ -188,17 +249,18 @@ def cmd_sweep(a):
             tag = f"cur{cur}_gain{gain}"
             for attempt in (1, 2):
                 video, subdev = graph_up(gain, a.exposure)
+                hold = None
                 if cur:
-                    torch_on(cur)
-                    time.sleep(0.25)          # let the boost ramp before capture
+                    hold = torch_hold_child(cur, 5)
+                    time.sleep(0.25)      # let the boost ramp before capture
                 else:
                     torch_off()
                 try:
                     buf = grab(video, a.frames)
                 finally:
                     rb = readback(subdev)
-                    wled = pmic.get(R_WLEDCTL)
-                    torch_off()
+                    wled = pmic.get(R_WLEDCTL)   # read while the holder is still lit
+                    torch_release(hold)
                 f = ip3y.frame_at(buf, a.frames - 1)
 
                 got_gain = int(rb.get("analogue_gain", -1))
@@ -220,6 +282,8 @@ def cmd_sweep(a):
 
 def cmd_feed(a):
     """Stream unpacked 8-bit frames into a v4l2loopback node until --duration."""
+    if not arm_parent_death():
+        sys.exit("parent went away before the capture started")
     video, subdev = graph_up(a.gain, a.exposure)
     ff = subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "gray",
@@ -253,9 +317,18 @@ def cmd_feed(a):
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
 
-    torch_on(a.current)
+    # The torch is a `cement-ir-rt torch hold` child (the one owner) with
+    # --parent=<us>: if we die by any means the kernel SIGTERMs the holder
+    # and the emitter goes dark; while we live, the holder refreshes MODE
+    # inside the ~13 s watchdog and self-terminates at its own deadline.
+    hold = None
+    if a.current:
+        try:
+            hold = torch_hold_child(a.current,
+                                    math.ceil(a.duration) + HOLDER_MARGIN_SECS)
+        except RuntimeError as e:
+            sys.exit(str(e))
     deadline = time.monotonic() + a.duration
-    last_refresh = time.monotonic()
     n = 0
     try:
         while not stop and time.monotonic() < deadline:
@@ -276,13 +349,10 @@ def cmd_feed(a):
                     pathlib.Path(a.ready_file).touch()
                 except OSError:
                     pass
-            if time.monotonic() - last_refresh > 8:      # inside the 13s watchdog
-                torch_refresh()
-                last_refresh = time.monotonic()
     except BrokenPipeError:
         pass
     finally:
-        torch_off()
+        torch_release(hold)
         # The marker lives only as long as this run does.
         if a.ready_file:
             try:
@@ -326,37 +396,26 @@ def cmd_feed(a):
 
 
 def cmd_torch(a):
-    """The illuminator as a command, not a raw register poke.
+    """The illuminator as a command, exec'd into its one owner.
 
     This replaces the August ir-wled.sh / iledctl.py probes, which each
     re-implemented the enable sequence -- and got it wrong before the retry loop
-    above existed. The torch cannot be left latched from here: the hold refreshes
-    MODE inside the 13 s watchdog, and main()'s finally turns it off on every exit
-    path. An emitter left on is invisible, draws current, and 40 s at 130 mA
-    browns out the sensor's own rail (garden hardware/notes/005).
-
-    Slice 005 of the milestone makes this the SOLE owner: hard current and
-    duration caps, and refusing to light with OVP|UVLO already latched.
+    above existed. Since slice 005 none of on/off/status writes a register from
+    this process: all three verbs exec `cement-ir-rt`, the emitter's one owner,
+    which enforces the hard current ceiling (3 steps), the duration ceiling
+    (120 s), the GSTAT pre-check (refuse on PWR_FLAG|OVP|UVLO), and releases on
+    every exit path (Drop + signals + PR_SET_PDEATHSIG + the ~13 s hardware
+    watchdog for SIGKILL). An emitter left on is invisible, draws current, and
+    40 s at 130 mA browns out the sensor's own rail (garden hardware/notes/005)
+    -- which is exactly what the owner's caps make unreachable.
     """
+    rt = rt_binary()
+    if a.action == "on":
+        os.execv(rt, [rt, "torch", "hold",
+                      f"--steps={a.current}", f"--duration={int(a.hold)}"])
     if a.action == "off":
-        torch_off()
-        print("  torch off")
-        return
-    if a.action == "status":
-        g, ctl = pmic.get(0x01), pmic.get(R_WLEDCTL)
-        print(f"  GSTAT    0x{g:02x}  [{pmic.decode_gstat(g)}]")
-        print(f"  WLEDCTL  0x{ctl:02x}  [{pmic.decode_ctl(ctl)}]")
-        print(f"  WLEDMAXT 0x{pmic.get(R_WLEDMAXT):02x}  "
-              f"WLEDC1 0x{pmic.get(R_WLEDC1):02x}  WLEDC2 0x{pmic.get(R_WLEDC2):02x}")
-        return
-    v = torch_on(a.current)
-    print(f"  torch on: {a.current} x 32.5mA  WLEDCTL=0x{v:02x}  holding {a.hold:.0f}s")
-    end = time.monotonic() + a.hold
-    while time.monotonic() < end:
-        time.sleep(min(6.0, max(0.0, end - time.monotonic())))
-        if time.monotonic() < end:
-            torch_refresh()
-    print(f"  releasing; WLEDCTL=0x{pmic.get(R_WLEDCTL):02x} while lit")
+        os.execv(rt, [rt, "torch", "off"])
+    os.execv(rt, [rt, "torch", "status"])
 
 
 def main():
@@ -374,7 +433,9 @@ def main():
     s = sub.add_parser("sweep"); s.set_defaults(fn=cmd_sweep)
     s.add_argument("--outdir", default="/home/ukv/ir-tune")
     s.add_argument("--frames", type=int, default=6)
-    s.add_argument("--currents", type=int, nargs="+", default=[0, 1, 2, 4])
+    # 4 steps (130 mA) is the measured damage current (hardware/notes/005)
+    # and the owner refuses it now; the sweep explores up to its ceiling.
+    s.add_argument("--currents", type=int, nargs="+", default=[0, 1, 2])
     s.add_argument("--gains", type=int, nargs="+", default=[128, 256, 512, 1023])
 
     s = sub.add_parser("feed"); s.set_defaults(fn=cmd_feed)

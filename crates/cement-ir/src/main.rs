@@ -1,18 +1,21 @@
 //! cement-ir-rt — the Rust runtime core of the IR face-auth path.
 //!
-//! Skeleton for slice 013 of the `ir-face-root-cause` milestone. Nothing here
-//! is on the auth path yet — the shell `./cement-ir` still dispatches
-//! everything, and `lib/irface.py` stays the working runtime until later
-//! slices cut verbs over one by one
-//! (`decision-cement-ir-rust-runtime-core`).
+//! Stood up in slice 013 of the `ir-face-root-cause` milestone; since slice
+//! 005 this binary (with `crates/tps68470`) is the emitter's **one owner** —
+//! the only code in the repo that writes a PMIC register. `lib/irface.py`,
+//! `howdy.sh`, `diag.sh` and `sensor-recover.sh` are consumers that ask it.
 //!
-//! The verbs this skeleton carries:
+//! The verbs:
 //! - `torch status` — read back + decode the emitter's PMIC registers
 //!   (mirrors `cement-ir torch status`).
-//! - `torch hold` — light the torch on the verified sequence and hold it,
-//!   demonstrating the guard: Drop + signals clear `WLEDCTL` on every exit
-//!   path a process can react to, and SIGKILL is covered by the ~13 s
-//!   hardware watchdog.
+//! - `torch hold [--steps N] [--duration S] [--parent PID]` — light the torch
+//!   on the verified sequence and hold it on a self-terminating deadline,
+//!   enforcing the compiled-in current ceiling (3 steps / 97.5 mA), the
+//!   duration ceiling (120 s) and the GSTAT pre-check (refuse on
+//!   PWR_FLAG|OVP|UVLO). Release: Drop + signals, PR_SET_PDEATHSIG on the
+//!   spawner, and the ~13 s hardware watchdog for SIGKILL.
+//! - `torch off` — extinguish (WLEDCTL = 0).
+//! - `torch clear-flags` — write-1-to-clear the latched GSTAT bits.
 //! - `ip3y unpack` — unpack a 399 360-byte ip3y frame to 16-bit samples.
 
 use std::path::PathBuf;
@@ -24,7 +27,9 @@ use clap::{Parser, Subcommand};
 
 mod signals;
 
-use tps68470::{bus, decode, regs, torch::Torch};
+use tps68470::bus::Bus;
+use tps68470::torch::{self, Torch};
+use tps68470::{bus, decode, regs};
 
 #[derive(Parser)]
 #[command(name = "cement-ir-rt", version, about = "Rust runtime core of the IR face-auth path")]
@@ -51,18 +56,32 @@ enum Cmd {
 enum TorchCmd {
     /// Read back and decode the emitter's PMIC registers.
     Status,
+    /// Extinguish the emitter (WLEDCTL = 0). Always allowed.
+    Off,
+    /// Write-1-to-clear the latched GSTAT fault bits (everything but WAKE).
+    ClearFlags,
     /// Light the torch on the verified sequence and hold it.
     ///
-    /// SIGTERM/SIGINT/SIGHUP release immediately (handler -> Drop);
-    /// SIGKILL cannot run code but needs none — the ~13 s hardware watchdog
-    /// clears EN by itself. Check with `cement-ir torch status`.
+    /// Refuses (one line, non-zero exit) above the compiled-in current
+    /// ceiling (3 steps / 97.5 mA), above the duration ceiling (120 s), or
+    /// while GSTAT latches PWR_FLAG|OVP|UVLO.
+    ///
+    /// Release: SIGTERM/SIGINT/SIGHUP release immediately (handler -> Drop);
+    /// --parent arms PR_SET_PDEATHSIG so the death of the spawning process
+    /// (any death, including SIGKILL) releases too; SIGKILL of this process
+    /// cannot run code but needs none — the ~13 s hardware watchdog clears
+    /// EN by itself. Check with `cement-ir torch status`.
     Hold {
-        /// torch current in 32.5 mA steps (1..=7; WLEDMAXT caps at 7)
+        /// torch current in 32.5 mA steps (1..=3; the owner refuses above)
         #[arg(long, default_value_t = 1)]
         steps: u8,
         /// hold time in seconds (MODE is refreshed inside the 13 s watchdog)
         #[arg(long, default_value_t = 30)]
         duration: u64,
+        /// pid to watch: arm PR_SET_PDEATHSIG so this process releases when
+        /// the spawner dies (the feeder passes its own pid)
+        #[arg(long)]
+        parent: Option<u32>,
     },
 }
 
@@ -82,7 +101,13 @@ fn main() -> ExitCode {
     match cli.cmd {
         Cmd::Torch { cmd } => match cmd {
             TorchCmd::Status => torch_status(),
-            TorchCmd::Hold { steps, duration } => torch_hold(steps, duration),
+            TorchCmd::Off => torch_off(),
+            TorchCmd::ClearFlags => torch_clear_flags(),
+            TorchCmd::Hold {
+                steps,
+                duration,
+                parent,
+            } => torch_hold(steps, duration, parent),
         },
         Cmd::Ip3y { cmd } => match cmd {
             Ip3yCmd::Unpack { raw, out } => ip3y_unpack(raw, out),
@@ -116,6 +141,11 @@ fn torch_status() -> ExitCode {
     match (g, s, c, i) {
         (Some(g), Some(s), Some(c), Some(i)) => {
             println!("  GSTAT    0x{g:02x}  [{}]", decode::join(&decode::gstat(g)));
+            if g & torch::GSTAT_BLOCK_LIGHT != 0 {
+                println!(
+                    "  (lighting refused while GSTAT latches PWR_FLAG|OVP|UVLO -- sudo cement-ir recover)"
+                );
+            }
             println!("  WLEDSTAT 0x{s:02x}  [{}]", decode::join(&decode::status(s)));
             let (mode, en, d1, d2, start) = decode::ctl(c);
             println!(
@@ -142,8 +172,8 @@ fn torch_status() -> ExitCode {
     }
 }
 
-fn torch_hold(steps: u8, duration: u64) -> ExitCode {
-    signals::install();
+/// Extinguish the emitter through the owner (the only PMIC writer).
+fn torch_off() -> ExitCode {
     let b = match open_bus() {
         Ok(b) => b,
         Err(e) => {
@@ -151,32 +181,188 @@ fn torch_hold(steps: u8, duration: u64) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let torch = Torch::on(b, steps, 4);
+    if let Err(e) = torch::off(&b) {
+        eprintln!("cement-ir-rt: cannot clear WLEDCTL: {e}");
+        return ExitCode::FAILURE;
+    }
+    match b.get(regs::WLEDCTL) {
+        Ok(v) => println!("  torch off (WLEDCTL=0x{v:02x})"),
+        Err(e) => {
+            eprintln!("cement-ir-rt: readback failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Write-1-to-clear the latched GSTAT bits (everything but WAKE) — the
+/// deliberate "clear the latch" surface, replacing `tps68470.py clearflags`.
+fn torch_clear_flags() -> ExitCode {
+    let b = match open_bus() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cement-ir-rt: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let before = match b.get(regs::GSTAT) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cement-ir-rt: read GSTAT failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let after = match torch::clear_gstat(&b) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cement-ir-rt: clear GSTAT failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "  GSTAT before clear 0x{before:02x}  [{}]",
+        decode::join(&decode::gstat(before))
+    );
+    println!(
+        "  GSTAT after clear  0x{after:02x}  [{}]",
+        decode::join(&decode::gstat(after))
+    );
+    ExitCode::SUCCESS
+}
+
+/// Arm PR_SET_PDEATHSIG so the parent's death (any death — SIGKILL included)
+/// arrives here as SIGTERM. Returns false if the parent is already gone.
+fn arm_parent_death(parent: u32) -> bool {
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+    }
+    let ppid = unsafe { libc::getppid() };
+    ppid == parent as libc::pid_t
+}
+
+/// After the guard released: read GSTAT. A power-fault latch that appeared
+/// *during* this hold (the pre-check guaranteed clean at start) means the
+/// run browned out the sensor's rail — clear it and report loudly, so the
+/// next auth attempt is not refused by a stale latch but the failure is not
+/// silent either. SIGKILL skips this code path by nature; the latch then
+/// stays and the *next* light attempt refuses + reports it, which is the
+/// design working.
+fn torch_post_release() -> ExitCode {
+    let b = match Bus::open() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cement-ir-rt: post-release check skipped: {e}");
+            return ExitCode::SUCCESS;
+        }
+    };
+    match b.get(regs::GSTAT) {
+        Ok(g) => {
+            println!(
+                "  GSTAT after release 0x{g:02x}  [{}]",
+                decode::join(&decode::gstat(g))
+            );
+            if g & torch::GSTAT_BLOCK_LIGHT != 0 {
+                match torch::clear_gstat(&b) {
+                    Ok(after) => {
+                        eprintln!(
+                            "cement-ir-rt: GSTAT latched during the hold ({}) -- cleared to 0x{after:02x}; the sensor's rail browned out, run cement-ir recover",
+                            decode::join(&decode::gstat(g)),
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("cement-ir-rt: GSTAT latched and the clear failed: {e}");
+                    }
+                }
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cement-ir-rt: post-release GSTAT read failed: {e}");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn torch_hold(steps: u8, duration: u64, parent: Option<u32>) -> ExitCode {
+    // Policy checks run before any hardware is touched, so a refusal costs
+    // nothing and needs no root.
+    if let Err(e) = torch::check_steps(steps) {
+        eprintln!("cement-ir-rt: refused: {e}");
+        return ExitCode::FAILURE;
+    }
+    if duration > torch::MAX_DURATION_SECS {
+        eprintln!(
+            "cement-ir-rt: refused: duration {duration}s is above the ceiling of {}s (the owner's own clock bounds every hold)",
+            torch::MAX_DURATION_SECS
+        );
+        return ExitCode::FAILURE;
+    }
+    signals::install();
+    if let Some(parent) = parent {
+        if !arm_parent_death(parent) {
+            eprintln!("cement-ir-rt: parent {parent} is already gone; not lighting");
+            return ExitCode::FAILURE;
+        }
+    }
+    let b = match open_bus() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cement-ir-rt: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The current ceiling is re-checked inside Torch::on (defence in depth);
+    // Torch::on also refuses on a latched GSTAT before any write.
+    let mut torch = match Torch::on(b, steps, 4) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("cement-ir-rt: refused: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     if !torch.lit() {
         eprintln!(
             "cement-ir-rt: torch EN never latched after 4 tries (the racy enable; see hardware/notes/005)"
         );
         return ExitCode::FAILURE;
     }
+    if signals::SIGNALLED.load(Ordering::SeqCst) {
+        // Parent died while the enable sequence ran; release immediately.
+        let _ = torch.off();
+        eprintln!("cement-ir-rt: signal before the hold started; released");
+        return ExitCode::FAILURE;
+    }
     println!("torch on: {} x 32.5 mA; holding {} s", steps, duration);
-    println!("  SIGTERM/SIGINT/SIGHUP release immediately; SIGKILL is covered by the ~13 s hardware watchdog");
+    if parent.is_some() {
+        println!("  releasing on SIGTERM/SIGINT/SIGHUP, on parent death, and on the {duration}s deadline; SIGKILL is covered by the ~13 s hardware watchdog");
+    } else {
+        println!("  SIGTERM/SIGINT/SIGHUP release immediately; SIGKILL is covered by the ~13 s hardware watchdog");
+    }
     let start = Instant::now();
+    let mut since_refresh = Instant::now();
+    // Short-chunk sleep: a SIGTERM (signal or parent death) must be noticed
+    // within ~200 ms, not after a full 10 s sleep, or the release promise is
+    // hollow. The MODE refresh stays time-based inside the ~13 s watchdog.
     while start.elapsed() < Duration::from_secs(duration) {
         if signals::SIGNALLED.load(Ordering::SeqCst) {
             eprintln!("cement-ir-rt: signal received; releasing");
             break;
         }
-        if let Err(e) = torch.refresh() {
-            eprintln!("cement-ir-rt: MODE refresh failed: {e}; releasing");
-            break;
+        if since_refresh.elapsed() >= Duration::from_secs(10) {
+            if let Err(e) = torch.refresh() {
+                eprintln!("cement-ir-rt: MODE refresh failed: {e}; releasing");
+                break;
+            }
+            since_refresh = Instant::now();
         }
-        std::thread::sleep(Duration::from_secs(10)); // keep inside the ~13 s watchdog
+        std::thread::sleep(Duration::from_millis(200));
     }
     if let Ok(v) = torch.ctl() {
         println!("releasing; WLEDCTL=0x{v:02x} while lit");
     }
-    // Torch drops here -> WLEDCTL = 0x00.
-    ExitCode::SUCCESS
+    drop(torch); // clears WLEDCTL now; the post-check reads the released state
+    torch_post_release()
 }
 
 fn ip3y_unpack(raw: PathBuf, out: PathBuf) -> ExitCode {

@@ -21,6 +21,20 @@ need_root() {   # need_root <subcommand>
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# The emitter's one owner (slice 005): the Rust runtime binary. Installed
+# wins (the /usr/local/bin discipline); before `make install` has run, the
+# in-tree release build stands in so the path keeps working. Every torch
+# call in every script goes through this -- nothing else writes a PMIC
+# register.
+rt_binary() {
+    if have cement-ir-rt; then
+        command -v cement-ir-rt
+        return
+    fi
+    local cand="$ROOT/crates/cement-ir/target/release/cement-ir-rt"
+    [[ -x $cand ]] && echo "$cand"
+}
+
 # The media graph renumbers across boots, so everything is resolved by entity
 # name. Callers that hardcode a node number get a device with no producer and
 # block forever with no error at all.

@@ -19,9 +19,16 @@ One entry point (`cement-ir`) over a path the kernel does not assemble for us:
   boots.
 - **`lib/irface.py`** captures raw `ip3y` frames from the CIO2 node, unpacks them
   (`lib/ip3y.py`), and republishes 8-bit greyscale on a v4l2loopback node that
-  OpenCV — and therefore howdy — can actually read. It also owns the illuminator.
-- **`lib/tps68470.py`** talks to the PMIC that powers the sensor *and* drives the
-  emitter, over raw i2c, because nothing in Linux programs its WLED block.
+  OpenCV — and therefore howdy — can actually read. It lights the illuminator
+  *through* the owner (below), never directly.
+- **`crates/`** — the Rust runtime core. `cement-ir-rt` (with `crates/tps68470`)
+  is the emitter's **one owner**: the only code that writes a PMIC register, and
+  it enforces a hard current ceiling (3 steps / 97.5 mA), a hard duration
+  ceiling (120 s) and a GSTAT pre-check, releasing on every exit path
+  (Drop + signals + `PR_SET_PDEATHSIG` + the ~13 s hardware watchdog).
+- **`lib/tps68470.py`** *reads* the PMIC that powers the sensor *and* drives the
+  emitter over raw i2c — read-only since slice 005, because nothing in Linux
+  programs its WLED block and the owner is the only writer.
 - **`system/howdy-ir-pam.in`** is the `pam_exec` helper that starts the feeder
   just before `pam_howdy.so` runs. It is rendered and installed by
   `cement-ir pam install-helper`.
@@ -71,7 +78,6 @@ Work in progress under the garden milestone `ir-face-root-cause`. There is **no
 git remote** — that is a deliberate, recorded decision, and the backup call is the
 human's.
 
-Not done yet, and known: the readiness gate still needs `python-opencv` (slice
-004), the wedge recovery still runs on every auth (slice 007), `doctor` is not yet
-the full source of truth (slice 004), and the emitter is not yet enforced to a
-single owner with hard caps (slice 005).
+Not done yet, and known: the wedge recovery still runs on every auth (slice 007),
+and `cement-ir-rt` is not yet installed to `/usr/local/bin` (deferred check D4 —
+until it runs, the torch falls back to the in-tree build).

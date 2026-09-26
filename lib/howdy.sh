@@ -72,7 +72,10 @@ fi
 cleanup() {
   kill "$FEEDER" 2>/dev/null
   wait "$FEEDER" 2>/dev/null
-  python3 "$LIB/tps68470.py" set 0x36 0x00 >/dev/null 2>&1
+  # Belt-and-braces over the feeder's own release: ask the one owner to
+  # extinguish, whatever happened above.
+  local RT; RT=$(rt_binary)
+  [[ -n $RT ]] && "$RT" torch off >/dev/null 2>&1
 }
 trap cleanup EXIT
 

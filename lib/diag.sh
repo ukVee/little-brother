@@ -72,7 +72,7 @@ diag_loopback() {
     "$LIB/irface.py" --gain 128 --current 1 \
         feed --device "$DEV" --duration 45 --fps 10 >"$FEEDLOG" 2>&1 &
     local FEEDER=$!
-    trap 'kill $FEEDER 2>/dev/null; python3 "$LIB/tps68470.py" set 0x36 0x00 >/dev/null 2>&1' EXIT
+    trap 'kill $FEEDER 2>/dev/null; local RT; RT=$(rt_binary); [[ -n $RT ]] && "$RT" torch off >/dev/null 2>&1' EXIT
     sleep 6
     if ! kill -0 "$FEEDER" 2>/dev/null; then
         echo "!! feeder already dead:"; cat "$FEEDLOG"; return 1
