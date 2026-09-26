@@ -161,7 +161,13 @@ echo "=== PAM ==="
 if [[ -e /usr/local/bin/howdy-ir-pam ]]; then
     if [[ -L /usr/local/bin/howdy-ir-pam ]]; then
         real=$(readlink -f /usr/local/bin/howdy-ir-pam)
-        if [[ $real == "$HOME"/dotfiles/.dots/* ]] && grep -q 'cement-ir-rt irfaced trigger' /usr/local/bin/howdy-ir-pam; then
+        # The helper reaches the binary through $RT, so the literal string
+        # "cement-ir-rt irfaced trigger" is never in it -- this grep FAILed a
+        # correct bombadil deploy on 2026-09-26. Assert what is really there:
+        # the installed path it resolves, and the trigger it issues.
+        if [[ $real == "$HOME"/dotfiles/.dots/* ]] \
+           && grep -q '^RT=/usr/local/bin/cement-ir-rt$' /usr/local/bin/howdy-ir-pam \
+           && grep -q 'irfaced trigger' /usr/local/bin/howdy-ir-pam; then
             ok "installed helper" "bombadil-managed ($real)"
             # Slice 007: the rebind is a fault handler, never a pre-auth step.
             # This is the grep that keeps it that way.
