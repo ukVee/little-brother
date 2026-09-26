@@ -41,23 +41,21 @@ SRC_DIR=/usr/src/${NAME}-${VER}
 # re-deriving the patch, which slice 008 of the milestone is meant to settle.
 STAGED=${STAGED:-/home/ukv/dw9719fix}
 
+# The five conditions live in the runtime core (crates/cement-ir/src/dkms.rs),
+# not here: the pacman hook and the boot unit call the INSTALLED binary, and a
+# second copy of the checks in shell would be free to disagree with the one the
+# hook enforces. This verb is the human-facing entry point to that one
+# implementation, plus the media-graph context a human wants to see.
 cmd_verify() {
-    local rc=0
-    echo -n "loaded srcversion : "; cat /sys/module/dw9719/srcversion 2>/dev/null || { echo "MODULE NOT LOADED"; rc=1; }
-    echo -n "dkms   srcversion : "; modinfo -F srcversion dw9719 2>/dev/null || { echo "NOT FOUND"; rc=1; }
-    echo -n "i2c alias present : "; modinfo dw9719 2>/dev/null | grep -c '^alias:.*i2c:dw9719' || rc=1
-    echo -n "VCM bound         : "
-    if [[ -e /sys/bus/i2c/devices/i2c-INT347A:00-VCM/driver ]]; then
-        readlink -f /sys/bus/i2c/devices/i2c-INT347A:00-VCM/driver
-    else
-        echo "STILL UNBOUND"; rc=1
+    local RT; RT=$(rt_binary) || true
+    if [[ -z ${RT:-} ]]; then
+        die "cement-ir-rt not built or installed -- make -C $ROOT build (then sudo make install)"
     fi
+    "$RT" dkms verify
+    local rc=$?
+    echo
     echo "media graph links :"
     media-ctl -p -d /dev/media0 2>/dev/null | grep -E 'ov5693|ov8865|ov7251' | sed 's/^/  /' || true
-    # All three must agree: loaded == dkms == has the i2c alias. A mismatch means
-    # the stock module squatted the name again, which is every camera silently
-    # disappearing -- the failure mode that produced one confidently-wrong garden
-    # note that stood for three months.
     return $rc
 }
 

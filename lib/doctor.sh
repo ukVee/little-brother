@@ -69,26 +69,18 @@ fi
 fi
 
 echo "=== dw9719 carry (without it NO camera appears) ==="
-loaded=$(cat /sys/module/dw9719/srcversion 2>/dev/null || true)
-dkmsv=$(modinfo -F srcversion dw9719 2>/dev/null || true)
-alias_n=$(modinfo dw9719 2>/dev/null | grep -c '^alias:.*i2c:dw9719' || true)
-[[ -n $loaded ]] && ok "module loaded" "srcversion $loaded" || bad "module loaded" "dw9719 is not loaded"
-if [[ -n $loaded && -n $dkmsv ]]; then
-    [[ $loaded == "$dkmsv" ]] && ok "srcversion matches" "$dkmsv" \
-        || bad "srcversion matches" "loaded $loaded != on-disk $dkmsv (stock module squatted the name)"
-fi
-[[ ${alias_n:-0} -ge 1 ]] && ok "i2c alias present" "$alias_n" \
-    || bad "i2c alias present" "0 -- this is the UNPATCHED module; no sensor will get a pad link"
-# The bind the media-link creation depends on: the driver symlink must resolve
-# to dw9719 itself, not merely exist (a bind to the stock module would squat
-# the name the same way and still kill every camera).
-vcm_drv=$(readlink /sys/bus/i2c/devices/i2c-INT347A:00-VCM/driver 2>/dev/null || true)
-if [[ ${vcm_drv##*/} == dw9719 ]]; then
-    ok "VCM bound" "i2c-INT347A:00-VCM -> dw9719"
-elif [[ -n $vcm_drv ]]; then
-    bad "VCM bound" "bound to ${vcm_drv##*/}, not dw9719"
+# ONE implementation of these checks, in the runtime core (slice 008): the same
+# code runs from the pacman hook on a linux-surface transaction and from the
+# boot unit, so doctor cannot drift from what the hook enforces. --porcelain
+# gives `status|name|detail`; we render it in doctor's own table.
+RTV=$(rt_binary) || true
+if [[ -n ${RTV:-} ]]; then
+    while IFS='|' read -r st nm dt; do
+        [[ -z ${st:-} ]] && continue
+        if [[ $st == ok ]]; then ok "$nm" "$dt"; else bad "$nm" "$dt"; fi
+    done < <("$RTV" dkms verify --porcelain 2>/dev/null)
 else
-    bad "VCM bound" "i2c-INT347A:00-VCM has no driver"
+    skip "dw9719 carry" "cement-ir-rt not built or installed -- make -C $ROOT build (then sudo make install)"
 fi
 
 echo "=== media graph (resolved by entity name -- node numbers move) ==="

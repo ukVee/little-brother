@@ -26,6 +26,9 @@
 //!   print it, without streaming (diagnostic).
 //! - `soak N` — run N full capture cycles back to back and report wedges,
 //!   recoveries and zero-frame cycles (slice 007; see `soak.rs`).
+//! - `dkms verify` — the five conditions that say the patched `dw9719` is
+//!   what `modprobe` resolved (slice 008; see `dkms.rs`). One implementation,
+//!   called by the pacman hook, the boot unit and `cement-ir doctor`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -35,6 +38,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 
 mod capture;
+mod dkms;
 mod faults;
 mod irfaced;
 mod signals;
@@ -68,6 +72,14 @@ enum Cmd {
     Irfaced {
         #[command(subcommand)]
         cmd: IrfacedCmd,
+    },
+    /// Is the patched `dw9719` what `modprobe` resolved, and did the cameras
+    /// appear? Read-only, needs no root. Without the patched module NO camera
+    /// on this machine enumerates — and the failure is silent, which is why
+    /// this is called from a pacman hook and at boot, not from memory.
+    Dkms {
+        #[command(subcommand)]
+        cmd: DkmsCmd,
     },
     /// Run N full capture cycles back to back and prove the sensor does not
     /// wedge (slice 007). Exits non-zero if any cycle wedged or needed a
@@ -151,6 +163,17 @@ enum IrfacedCmd {
 }
 
 #[derive(Subcommand)]
+enum DkmsCmd {
+    /// Report the five conditions; exit non-zero if any failed.
+    Verify {
+        /// emit `status|name|detail` lines for the shell half instead of the
+        /// human table (one implementation, two renderings)
+        #[arg(long)]
+        porcelain: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum TorchCmd {
     /// Read back and decode the emitter's PMIC registers.
     Status,
@@ -216,6 +239,9 @@ fn main() -> ExitCode {
                 irfaced::trigger_run(duration, steps, gain, exposure, timeout, &socket)
             }
             IrfacedCmd::Resolve { media } => irfaced::resolve_run(&media),
+        },
+        Cmd::Dkms { cmd } => match cmd {
+            DkmsCmd::Verify { porcelain } => dkms::verify_run(porcelain),
         },
         Cmd::Soak {
             cycles,
