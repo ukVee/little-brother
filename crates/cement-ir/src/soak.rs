@@ -87,9 +87,18 @@ impl Pmic {
         }
     }
 
-    /// A power-fault latch on the rail that also feeds the sensor.
-    fn latched(&self) -> bool {
+    /// A power-fault latch that would make `Torch::on` refuse to light. True of
+    /// the benign `PWR_FLAG|OVP` every torch cycle leaves behind, so it is a
+    /// statement about the *emitter*, never about the sensor.
+    fn blocks_light(&self) -> bool {
         self.gstat.is_some_and(|g| g & torch::GSTAT_BLOCK_LIGHT != 0)
+    }
+
+    /// The rail under the **sensor** collapsed (`UVLO`). This is the wedge
+    /// signature; see [`torch::GSTAT_SENSOR_WEDGE`] for why the two predicates
+    /// must not be the same one.
+    fn wedge_latched(&self) -> bool {
+        self.gstat.is_some_and(|g| g & torch::GSTAT_SENSOR_WEDGE != 0)
     }
 
     /// Torch still drawing current after teardown.
@@ -115,6 +124,11 @@ struct Cycle {
     first_frame: Option<Duration>,
     /// Empty = the cycle passed.
     faults: Vec<String>,
+    /// Things worth saying that are not failures — a benign `PWR_FLAG|OVP`
+    /// latch being the one that matters. Kept separate from `faults` so a
+    /// healthy cycle stays `ok` and stays out of the wedge counter, while the
+    /// run is still not silent about the register state it saw.
+    notes: Vec<String>,
     /// The cycle hit the wedge signature specifically (vs. a config error).
     wedged: bool,
     /// `GSTAT` latched a power fault when the emitter went out, and the
@@ -160,23 +174,40 @@ fn run_cycle(o: &Opts) -> Cycle {
         frames: 0,
         first_frame: None,
         faults: Vec::new(),
+        notes: Vec::new(),
         wedged: false,
         latched_at_release: false,
         detail: String::new(),
     };
     let started = Instant::now();
 
-    // 1. Pre-check: a latch left by an earlier cycle means the rail already
-    //    browned out, and Torch::on would (correctly) refuse.
+    // 1. Pre-check. Two different findings, and conflating them is what made
+    //    the wedge counter meaningless: `UVLO` says the sensor's rail collapsed
+    //    (a wedge), while the `PWR_FLAG|OVP` that every torch cycle leaves
+    //    behind says only that lighting would be refused. The latter is a
+    //    failure of *this run* when the run needs the emitter, and irrelevant
+    //    when it does not — never a wedge, and never grounds for a rebind.
     let pre = Pmic::read();
-    if pre.latched() {
+    if pre.wedge_latched() {
         c.fault(
             true,
             format!(
-                "GSTAT already latched at cycle start ({})",
+                "GSTAT shows the sensor rail browned out at cycle start ({})",
                 decode::join(&decode::gstat(pre.gstat.unwrap_or(0)))
             ),
         );
+    } else if pre.blocks_light() {
+        let bits = decode::join(&decode::gstat(pre.gstat.unwrap_or(0)));
+        if o.steps >= 1 {
+            c.fault(
+                false,
+                format!("GSTAT latched at cycle start ({bits}) -- the emitter will be refused; run cement-ir recover"),
+            );
+        } else {
+            c.notes.push(format!(
+                "GSTAT latched at cycle start ({bits}) -- benign here (steps=0, no emitter); lighting would be refused"
+            ));
+        }
     }
 
     // 2. Graph.
@@ -300,8 +331,15 @@ fn run_cycle(o: &Opts) -> Cycle {
 
     // 9. Post-conditions.
     if c.frames < o.min_frames {
+        // A shortfall is only *independent* evidence of a wedge when nothing
+        // else already explained it. If the capture was refused — `EBUSY`
+        // because `irfaced` is mid-feed is the case that actually happens —
+        // the cause is already recorded and classified, and re-counting the
+        // consequence as a wedge would arm the rebind handler against a live
+        // auth. That is the failure mode this guard exists to prevent.
+        let unexplained = c.faults.is_empty();
         c.fault(
-            true,
+            unexplained,
             format!("{} frames (need >= {})", c.frames, o.min_frames),
         );
     }
@@ -322,14 +360,22 @@ fn run_cycle(o: &Opts) -> Cycle {
         );
     }
     let post = Pmic::read();
-    if post.latched() {
+    if post.wedge_latched() {
         c.fault(
             true,
             format!(
-                "GSTAT latched during the cycle ({})",
+                "GSTAT shows the sensor rail browned out during the cycle ({})",
                 decode::join(&decode::gstat(post.gstat.unwrap_or(0)))
             ),
         );
+    } else if post.blocks_light() {
+        // Expected at steps >= 1 and harmless: the frames are already counted
+        // and the subdev readback below is the real health check. Recorded so
+        // the run is not silent about it, but not a fault in either sense.
+        c.notes.push(format!(
+            "GSTAT latched during the cycle ({}) -- lighting would be refused until cleared",
+            decode::join(&decode::gstat(post.gstat.unwrap_or(0)))
+        ));
     }
     if post.torch_on() {
         c.fault(false, "torch still EN after teardown".to_string());
@@ -441,6 +487,9 @@ pub fn soak_run(o: Opts) -> ExitCode {
                 "  cycle {i:>3}/{}  ok     frames={:<4} first={first:<8} {}",
                 o.cycles, c.frames, c.detail
             );
+            for n in &c.notes {
+                println!("        . {n}");
+            }
         } else {
             if c.wedged {
                 wedges += 1;
@@ -455,6 +504,9 @@ pub fn soak_run(o: Opts) -> ExitCode {
             );
             for f in &c.faults {
                 println!("        - {f}");
+            }
+            for n in &c.notes {
+                println!("        . {n}");
             }
             // The handler is a fault handler now: it runs *here*, after a real
             // failure, never in front of an auth attempt.

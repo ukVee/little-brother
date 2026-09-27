@@ -62,6 +62,23 @@ pub const MAX_DURATION_SECS: u64 = 120;
 /// refusal to the power-fault class that wedges `ov7251`.)
 pub const GSTAT_BLOCK_LIGHT: u8 = 0x4C;
 
+/// The GSTAT bit that means the **sensor's rail** actually browned out: `UVLO`.
+///
+/// This is deliberately *not* [`GSTAT_BLOCK_LIGHT`], and the difference is the
+/// whole point. That constant answers "is it unsafe to light the emitter?", for
+/// which any power-fault latch is a correct refusal. This one answers a
+/// different question — "did the rail collapse under the sensor?" — and only
+/// `UVLO` is evidence of that.
+///
+/// Measured 2026-09-27: `PWR_FLAG|OVP` (`0x48`) latches on **every** torch
+/// cycle at the production 32.5 mA, while the boost runs, with the sensor
+/// entirely healthy afterwards — 29 frames a cycle, 137 ms to first frame. A
+/// wedge is `UVLO` **plus** a sensor that has stopped answering I2C, and the
+/// mute half is detected separately by the subdev readback. Using
+/// `GSTAT_BLOCK_LIGHT` to judge wedges counted 79 of them against one real
+/// fault, and — worse — armed the rebind fault handler after a healthy cycle.
+pub const GSTAT_SENSOR_WEDGE: u8 = 0x04;
+
 #[derive(Debug)]
 pub enum Error {
     /// The requested current is outside 1..=MAX_STEPS (0 means "use off";
@@ -324,6 +341,53 @@ impl Drop for Torch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two GSTAT predicates answer different questions and must not
+    /// collapse back into one. `0x48` is not a hypothetical: it is what this
+    /// device reads after every face auth, with the sensor then delivering 29
+    /// frames a cycle. Treating it as a wedge counted 79 wedges against one
+    /// real fault and armed a rebind after healthy cycles.
+    #[test]
+    fn benign_ovp_latch_blocks_light_but_is_not_a_wedge() {
+        let measured = 0x48; // PWR_FLAG|OVP, no UVLO -- observed 2026-09-27
+        assert_ne!(
+            measured & GSTAT_BLOCK_LIGHT,
+            0,
+            "lighting must still be refused while a power fault is latched"
+        );
+        assert_eq!(
+            measured & GSTAT_SENSOR_WEDGE,
+            0,
+            "PWR_FLAG|OVP alone is NOT the sensor-wedge signature"
+        );
+    }
+
+    #[test]
+    fn uvlo_is_the_wedge_signature_and_also_blocks_light() {
+        for wedged in [0x04, 0x0C, 0x4C, 0x44] {
+            assert_ne!(
+                wedged & GSTAT_SENSOR_WEDGE,
+                0,
+                "0x{wedged:02x} carries UVLO, so it is a wedge"
+            );
+            assert_ne!(
+                wedged & GSTAT_BLOCK_LIGHT,
+                0,
+                "0x{wedged:02x} must also refuse lighting"
+            );
+        }
+    }
+
+    /// The wedge predicate has to be a strict subset, or the split is an
+    /// illusion: anything that reads as a wedge must also refuse to light.
+    #[test]
+    fn wedge_signature_is_a_subset_of_the_lighting_refusal() {
+        assert_eq!(GSTAT_SENSOR_WEDGE & GSTAT_BLOCK_LIGHT, GSTAT_SENSOR_WEDGE);
+        assert_ne!(
+            GSTAT_SENSOR_WEDGE, GSTAT_BLOCK_LIGHT,
+            "if these are equal the classification bug is back"
+        );
+    }
 
     #[test]
     fn steps_ceiling_refuses_above_and_zero() {
