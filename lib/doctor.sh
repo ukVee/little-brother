@@ -263,8 +263,19 @@ if [[ -r /etc/howdy/config.ini ]]; then
     models=$( { ls "/etc/howdy/models/$u".dat; ls "/etc/howdy/models/$u"/*.dat; } 2>/dev/null | wc -l )
     [[ ${models:-0} -ge 1 ]] && ok "howdy model for $u" "$models" \
         || bad "howdy model for $u" "0 enrolled models under /etc/howdy/models -- sudo $ROOT/cement-ir howdy add"
+    # config.ini now carries a deliberate local edit (dark_threshold 75 -> 80,
+    # journal/decisions/decision-raise-howdy-dark-threshold.md), so an upstream
+    # change to the stock defaults is something we need TOLD about. It is the
+    # mirror image of the pam.d case checked above: config.ini IS in
+    # howdy-next's backup array, so pacman leaves a .pacnew instead of
+    # overwriting -- which only helps if something reads it. /etc/pam.d/gtklock
+    # is not a backup file, so it gets silently restored and never leaves one.
+    hp=$(ls /etc/howdy/*.pacnew 2>/dev/null | tr '\n' ' ')
+    [[ -z $hp ]] && ok "no .pacnew in /etc/howdy" "the local dark_threshold edit is unchallenged" \
+        || bad "no .pacnew in /etc/howdy" "$hp -- upstream defaults moved; diff it before merging, the local edit is deliberate"
 else
     skip "howdy device_path" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
+    skip "no .pacnew in /etc/howdy" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
 fi
 fi
 

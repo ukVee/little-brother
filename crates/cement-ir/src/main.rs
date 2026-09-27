@@ -202,8 +202,11 @@ enum TorchCmd {
     /// Release: SIGTERM/SIGINT/SIGHUP release immediately (handler -> Drop);
     /// --parent arms PR_SET_PDEATHSIG so the death of the spawning process
     /// (any death, including SIGKILL) releases too; SIGKILL of this process
-    /// cannot run code but needs none — the ~13 s hardware watchdog clears
-    /// EN by itself. Check with `cement-ir torch status`.
+    /// cannot run code but needs none — the ~13 s hardware watchdog takes the
+    /// emitter dark on its own. It clears `START` ONLY, though: `EN`, `MODE`
+    /// and the current registers stay programmed, so `WLEDCTL` reads `0x05`
+    /// and not `0x00`. Check with `cement-ir torch status`, which decodes
+    /// `START` + `WLEDSTAT` — a non-zero `WLEDCTL` does not mean lit.
     Hold {
         /// torch current in 32.5 mA steps (1..=3; the owner refuses above)
         #[arg(long, default_value_t = 1)]

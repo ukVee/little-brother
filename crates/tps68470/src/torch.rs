@@ -31,9 +31,17 @@
 //!   the feeder (or its parent) turns into a SIGTERM here — released, not
 //!   orphaned.
 //! - SIGKILL: no code can run, and none needs to — the ~13 s hardware
-//!   watchdog clears EN by itself. "Released on every exit path" is a
-//!   property of the type *and* the hardware together, not a claim about the
-//!   code.
+//!   watchdog takes the emitter dark on its own. "Released on every exit
+//!   path" is a property of the type *and* the hardware together, not a
+//!   claim about the code.
+//!
+//!   Measured twice (2026-09-26, 2026-09-27) by `SIGKILL`ing a holder
+//!   mid-hold: the watchdog clears **`START` only** and sets `WLEDSTAT` `TO`.
+//!   `EN`, `MODE` and the current registers stay programmed, so `WLEDCTL`
+//!   reads `0x05`, not `0x00` — the emitter is dark but still *armed*, and a
+//!   non-zero `WLEDCTL` therefore does NOT mean lit (`hardware/notes/005`).
+//!   `Torch::on` writes `WLEDCTL = 0x00` before every light, so the next
+//!   capture recovers the register by itself.
 
 use std::fmt;
 use std::io;
