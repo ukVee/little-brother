@@ -263,14 +263,20 @@ static int dw9719_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct dw9719_device *dw9719 = to_dw9719_device(sd);
-	int ret;
 	int val;
 
+	/*
+	 * Park the lens gently before cutting power, so it does not slam into
+	 * its end stop. This is best effort: if the chip stops answering, give
+	 * up on the ramp but still power down. Failing the callback would leave
+	 * the regulator on and the device stuck in the runtime-PM error state,
+	 * and pm_runtime_force_suspend() would then fail every system suspend.
+	 * cci_write() has already logged the failed write.
+	 */
 	for (val = dw9719->ctrls.focus->val; val >= 0;
 	     val -= DW9719_CTRL_STEPS) {
-		ret = dw9719_t_focus_abs(dw9719, val);
-		if (ret)
-			return ret;
+		if (dw9719_t_focus_abs(dw9719, val))
+			break;
 
 		usleep_range(DW9719_CTRL_DELAY_US, DW9719_CTRL_DELAY_US + 10);
 	}
@@ -387,34 +393,52 @@ static int dw9719_probe(struct i2c_client *client)
 	dw9719->sd.entity.function = MEDIA_ENT_F_LENS;
 
 	/*
-	 * We need the driver to work in the event that pm runtime is disable in
-	 * the kernel, so power up and verify the chip now. In the event that
-	 * runtime pm is disabled this will leave the chip on, so that the lens
-	 * will work.
+	 * Power up once to detect the chip and program its mode registers.
 	 */
-
 	ret = dw9719_power_up(dw9719, true);
 	if (ret)
 		goto err_cleanup_media;
 
-	pm_runtime_set_active(&client->dev);
-	pm_runtime_get_noresume(&client->dev);
+	/*
+	 * Then, with runtime PM, power straight back down and start in the
+	 * suspended state, so that the first real use goes through
+	 * dw9719_resume() and the runtime-PM core.
+	 *
+	 * On IPU3/IPU6 machines the VCM's I2C interface is only reachable while
+	 * the sensor it belongs to is powered (on the Surface Go 3 it sits
+	 * behind the sensor's VSIO rail). ipu-bridge expresses that with a
+	 * DL_FLAG_PM_RUNTIME device link from this device to the sensor, but it
+	 * adds the link only *after* this probe has returned, holding the
+	 * sensor up just for the duration of the probe. A device left
+	 * runtime-active here therefore holds no reference on the sensor: the
+	 * sensor suspends underneath it, the first autosuspend's focus writes
+	 * get NAKed, and the device is stuck in the runtime-PM error state,
+	 * which in turn makes every system suspend fail in
+	 * pm_runtime_force_suspend(). Starting suspended means the first
+	 * pm_runtime_resume_and_get() finds the link and powers the sensor
+	 * first.
+	 *
+	 * Without runtime PM nothing would ever call dw9719_resume(), so the
+	 * chip stays on, as it always has.
+	 */
+	if (IS_ENABLED(CONFIG_PM))
+		dw9719_power_down(dw9719);
+
+	pm_runtime_set_autosuspend_delay(&client->dev, 1000);
+	pm_runtime_use_autosuspend(&client->dev);
 	pm_runtime_enable(&client->dev);
 
 	ret = v4l2_async_register_subdev(&dw9719->sd);
 	if (ret < 0)
 		goto err_pm_runtime;
 
-	pm_runtime_set_autosuspend_delay(&client->dev, 1000);
-	pm_runtime_use_autosuspend(&client->dev);
-	pm_runtime_put_autosuspend(&client->dev);
-
-	return ret;
+	return 0;
 
 err_pm_runtime:
 	pm_runtime_disable(&client->dev);
-	pm_runtime_put_noidle(&client->dev);
-	dw9719_power_down(dw9719);
+	pm_runtime_dont_use_autosuspend(&client->dev);
+	if (!IS_ENABLED(CONFIG_PM))
+		dw9719_power_down(dw9719);
 err_cleanup_media:
 	media_entity_cleanup(&dw9719->sd.entity);
 err_free_ctrl_handler:

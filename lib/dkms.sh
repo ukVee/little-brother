@@ -93,14 +93,28 @@ EOF
     dkms install -m "$NAME" -v "$VER" --force
 
     echo "### swapping the running module for the patched one"
-    rmmod dw9719 2>/dev/null || true
     depmod -a
-    modprobe dw9719
+    # A bound VCM cannot be swapped live. Once ipu3-cio2's notifier completes,
+    # v4l2_device_register_subdev() holds a reference on the dw9719 module, so
+    # rmmod is EBUSY for as long as the camera graph is up. That is the normal
+    # state, not an error. This used to be `rmmod ... || true`, which hid the
+    # failure and made verify blame "the stock module". Unbinding to force it
+    # would tear the graph down under the face-auth path, and it would only
+    # exercise the rebind ordering (garden projects/cement-ir/notes/005), not the
+    # cold-boot one. So: say so, and let the reboot load the new build.
+    local swapped=1
+    if [[ -d /sys/module/dw9719 ]] && ! rmmod dw9719 2>/dev/null; then
+        swapped=0
+        echo "    the running dw9719 is pinned by the camera graph -- NOT swapped."
+        echo "    The new build is installed and loads at the next boot."
+    fi
+    [[ $swapped = 1 ]] && modprobe dw9719
 
     echo
     echo "### verification -- these must agree"
     cmd_verify
     echo
+    [[ $swapped = 0 ]] && echo "(The srcversion FAILs above are expected until that reboot.)"
     echo "Reboot and re-run \`cement-ir dkms verify\` to prove it persists -- the whole"
     echo "point is surviving a cold boot, so do not record it as working until you have"
     echo "seen it come up clean after one."

@@ -34,7 +34,11 @@ use irctl::media;
 /// stable across kernel rebuilds and changes only if the *patch* changes.
 /// Anything else running under the name `dw9719` is not the module that was
 /// vetted. (If you legitimately re-derive the patch, update this.)
-pub const PATCHED_SRCVERSION: &str = "1458708E79A2D2CA601F853";
+///
+/// 2026-10-02: `1458708E79A2D2CA601F853` → this. The carry gained a second
+/// delta, the runtime-PM fix that stops dw9719 from aborting every system
+/// suspend (system/dw9719/README.md).
+pub const PATCHED_SRCVERSION: &str = "268591B62EE1FD6962113C4";
 /// The stock, broken module — recorded because the mismatch **is** the
 /// diagnosis, and a prefix is all that was captured in August.
 pub const STOCK_SRCVERSION_PREFIX: &str = "7EDAAC55";
@@ -167,9 +171,16 @@ pub fn verify(scope: &Scope) -> Vec<Check> {
     if running {
         match (&loaded, &on_disk) {
             (Some(l), Some(d)) if l == d => checks.push(ok("srcversion matches", d.clone())),
-            (Some(l), Some(d)) => checks.push(bad(
+            (Some(l), Some(d)) if l.starts_with(STOCK_SRCVERSION_PREFIX) => checks.push(bad(
                 "srcversion matches",
                 format!("loaded {l} != on-disk {d} (the stock module squatted the name)"),
+            )),
+            // A bound VCM pins its module (the camera graph holds a reference),
+            // so a fresh install cannot be swapped in live: the old build runs
+            // until the next boot.
+            (Some(l), Some(d)) => checks.push(bad(
+                "srcversion matches",
+                format!("loaded {l} != on-disk {d} (an older build is still running; reboot to load the installed one)"),
             )),
             (_, None) => checks.push(bad(
                 "srcversion matches",
