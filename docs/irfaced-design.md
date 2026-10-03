@@ -97,7 +97,7 @@ gain u16 | exposure u32 | kind u8 (1 = frames) | count u8 (1..=10) | reserved[11
     peer gets `error forbidden (irfaced serves root only)` at once, so it
     cannot hold the single-threaded loop for the 2 s read timeout while an
     auth waits.
-  - The socket's file mode says the same thing (`0600`, dotfiles `a8581a9`),
+  - The socket's file mode says the same thing (`0600` in a `0700` directory, dotfiles `fd0b614`),
     but a unit edit loosened it once (`b869fc9`), so the daemon enforces it
     itself.
 - **Auth always wins.** A frames request during an auth feed is refused
