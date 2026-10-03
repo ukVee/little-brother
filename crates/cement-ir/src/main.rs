@@ -156,8 +156,9 @@ enum IrfacedCmd {
         socket: String,
     },
     /// Ask the daemon for N frames on the socket (protocol v2; root callers
-    /// only). Prints each frame's timestamp, mean and howdy darkness, and
-    /// drops the pixels. Exits non-zero on any error reply.
+    /// only). Prints each frame's timestamp, mean and raw darkness (taken
+    /// before CLAHE, so not howdy's), and drops the pixels. Exits non-zero on
+    /// any error reply.
     Frames {
         /// how many frames (1..=10)
         #[arg(long, default_value_t = irfaced::DEFAULT_FRAMES)]

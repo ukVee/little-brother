@@ -362,14 +362,16 @@ pub fn mono_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-/// Mean level and howdy's darkness of an 8-bit frame, in one pass.
+/// Mean level and raw darkness of an 8-bit frame, in one pass.
 ///
-/// Darkness is `howdy-compare`'s: the share of pixels in the darkest of 8
-/// histogram bins over 0..256 (values 0..=31), as a percentage. Read off the
-/// installed howdy-next 3.4 binary — `cv::calcHist` with histSize 8 and range
-/// 0..256, then `hist[0] / sum * 100` — so a frame here and the same frame in
-/// `pam_howdy` get the same number. A frame is rejected when this EXCEEDS
-/// `dark_threshold` (garden `projects/cement-ir/notes/003` §2).
+/// Darkness is the share of pixels in the darkest of 8 histogram bins over
+/// 0..256 (values 0..=31), as a percentage: `howdy-compare`'s histogram, read
+/// off the installed howdy-next 3.4 binary (`cv::calcHist` with histSize 8 and
+/// range 0..256, then `hist[0] / sum * 100`), but on the frame as captured.
+/// howdy applies CLAHE before it takes the histogram, so its number for the
+/// same scene is lower (71.16 vs 92.1, garden fid-gate slice 004 Block 3), and
+/// this value must not be compared with `dark_threshold`
+/// (garden `projects/cement-ir/notes/003` §2).
 pub fn stats(px: &[u8]) -> (f32, f32) {
     let (mut sum, mut dark) = (0u64, 0u64);
     for &p in px {
@@ -1489,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn darkness_matches_howdys_first_bin() {
+    fn darkness_is_the_raw_first_bin_share() {
         assert_eq!(stats(&[0; 100]), (0.0, 100.0));
         assert_eq!(stats(&[255; 100]), (255.0, 0.0));
         // the bin edge: 31 is in the darkest of 8 bins over 0..256, 32 is not

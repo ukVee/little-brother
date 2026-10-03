@@ -79,10 +79,14 @@ gain u16 | exposure u32 | kind u8 (1 = frames) | count u8 (1..=10) | reserved[11
   width u16 | height u16 | mono_ns u64 | mean f32 | darkness f32`, LE) and
   `len` bytes of 640x480 8-bit grey (the same `>> 2` the loopback gets).
   - `mono_ns` is `CLOCK_MONOTONIC` when the daemon dequeued the frame.
-  - `darkness` is howdy's: 100 × the share of pixels in the first of 8
-    histogram bins over 0..256. It was read off `howdy-compare`'s
-    `cv::calcHist` call, so the same frame gets the same number in
-    `pam_howdy`.
+  - `darkness` is the **raw** first-bin share: 100 × the share of pixels in
+    the first of 8 histogram bins over 0..256. That is `howdy-compare`'s
+    `cv::calcHist` histogram, but taken on the frame as captured. howdy
+    applies CLAHE first, so its `Average darkness` for the same scene reads
+    lower: 71.16 against 92.1 (garden: fid-gate slice 004, Block 3,
+    2026-10-03). Comparing this value with `dark_threshold` is wrong. A
+    consumer that needs howdy's number takes it after CLAHE
+    (facial-id-defender's `fid-face` does).
   - Or one `error <code> (<detail>)` line. The codes are `invalid`,
     `forbidden`, `busy`, `preempted`, `capture`, `torch`, `short` and
     `stopping`.
