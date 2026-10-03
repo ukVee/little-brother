@@ -34,9 +34,10 @@
 //! back **on the socket** instead of on the loopback: same capture path, same
 //! operating point, same teardown. Three rules shape it:
 //!
-//! - **Root callers only**, by `SO_PEERCRED` ([`may_take_frames`]). The socket
-//!   is `0660 root:wheel` for the trigger, so this check is all that stands
-//!   between a wheel process and IR face frames.
+//! - **Root callers only, for every request** — frames and the trigger alike
+//!   — by `SO_PEERCRED` ([`may_use`]). The socket's file mode says the same,
+//!   but a unit edit loosened it once (dotfiles `b869fc9`), so the daemon
+//!   enforces it itself.
 //! - **Auth always wins** ([`route`]). A frames request during an auth feed is
 //!   refused `busy` without touching the sensor. An auth trigger during a
 //!   frames capture ends that capture at once (its caller gets `preempted`)
@@ -236,15 +237,18 @@ impl Request {
     }
 }
 
-/// May this peer take frames? Root, or the daemon's own user.
+/// May this peer use the daemon at all? Root, or the daemon's own user.
+///
+/// The sensor is exclusive to its controllers (the owner's decision,
+/// 2026-10-03): the PAM helper, root through `pam_exec seteuid` (an EUID is
+/// what `SO_PEERCRED` reports), and `fid-gated`, root. Anything unprivileged
+/// borrows through `fid-gated`, never this socket. A trigger lights the
+/// emitter, and frames are face data, so neither is handed to a wheel process.
 ///
 /// The production daemon runs as root, so that is uid 0 alone. A daemon a
 /// developer runs as themselves on a private socket (`IRFACED_SOCKET`) serves
-/// only themselves, which is what lets the verb be exercised without root.
-///
-/// The trigger is not gated here: it keeps the socket's own access, `0660
-/// root:wheel`. Narrowing that is a separate decision.
-pub fn may_take_frames(peer_uid: u32, own_euid: u32) -> bool {
+/// only themselves, which is what lets it be exercised without root.
+pub fn may_use(peer_uid: u32, own_euid: u32) -> bool {
     peer_uid == 0 || peer_uid == own_euid
 }
 
@@ -256,7 +260,7 @@ enum Busy {
     Grabbing,
 }
 
-/// Why a frames request was turned away before any hardware was touched.
+/// Why a request was turned away before any hardware was touched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
     Forbidden,
@@ -274,7 +278,7 @@ impl Refusal {
 
     fn detail(self) -> &'static str {
         match self {
-            Refusal::Forbidden => "frames are served to root only",
+            Refusal::Forbidden => "irfaced serves root only",
             Refusal::BusyFeed => "an auth feed is live",
             Refusal::BusyGrab => "another frames capture is running",
         }
@@ -294,15 +298,15 @@ enum Route {
     Refuse(Refusal),
 }
 
-/// The ownership rules, as one table. Auth always wins: a feed is never
-/// refused or queued behind a frames capture, and a frames request never
-/// touches the sensor while a feed holds it.
-fn route(kind: Kind, state: Busy, frames_allowed: bool) -> Route {
+/// The ownership rules, as one table, for a peer already allowed in
+/// ([`may_use`] runs before the request is even read). Auth always wins: a
+/// feed is never refused or queued behind a frames capture, and a frames
+/// request never touches the sensor while a feed holds it.
+fn route(kind: Kind, state: Busy) -> Route {
     match (kind, state) {
         (Kind::Feed { duration_secs }, Busy::Idle) => Route::StartFeed { duration_secs },
         (Kind::Feed { .. }, Busy::Feeding) => Route::JoinFeed,
         (Kind::Feed { duration_secs }, Busy::Grabbing) => Route::PreemptThenFeed { duration_secs },
-        (Kind::Frames { .. }, _) if !frames_allowed => Route::Refuse(Refusal::Forbidden),
         (Kind::Frames { .. }, Busy::Feeding) => Route::Refuse(Refusal::BusyFeed),
         (Kind::Frames { .. }, Busy::Grabbing) => Route::Refuse(Refusal::BusyGrab),
         (Kind::Frames { count }, Busy::Idle) => Route::StartGrab { count },
@@ -999,7 +1003,7 @@ fn bind_listener(path: &Path) -> io::Result<UnixListener> {
 struct Ctx {
     media_path: PathBuf,
     loopback: String,
-    /// The daemon's own euid, for [`may_take_frames`].
+    /// The daemon's own euid, for [`may_use`].
     own_euid: u32,
 }
 
@@ -1017,9 +1021,27 @@ fn start_feed(
     }
 }
 
-/// Handle one connection: parse + validate, then do what [`route`] says.
+/// Handle one connection: who is it, then parse + validate, then do what
+/// [`route`] says.
 fn handle_connection(stream: UnixStream, active: &mut Option<Active>, ctx: &Ctx) {
     let mut stream = stream;
+    // Who, before a single byte is read: a peer that may not use the daemon
+    // is refused at once, so it cannot even hold this single-threaded loop for
+    // the read timeout below while an auth waits. A peer that cannot be
+    // identified is refused too (fail closed).
+    let peer = match peer_of(&stream) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("irfaced: SO_PEERCRED failed: {e}");
+            None
+        }
+    };
+    if !peer.is_some_and(|p| may_use(p.uid, ctx.own_euid)) {
+        let r = Refusal::Forbidden;
+        refuse(&mut stream, r.code(), r.detail());
+        eprintln!("irfaced: refused {}: {} ({})", who(peer), r.code(), r.detail());
+        return;
+    }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut buf = [0u8; REQ_BYTES];
     if let Err(e) = stream.read_exact(&mut buf) {
@@ -1034,18 +1056,8 @@ fn handle_connection(stream: UnixStream, active: &mut Option<Active>, ctx: &Ctx)
             return;
         }
     };
-    // Read for every request, consulted only for frames. A peer that cannot
-    // be identified is not allowed frames (fail closed).
-    let peer = match peer_of(&stream) {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!("irfaced: SO_PEERCRED failed: {e}");
-            None
-        }
-    };
-    let allowed = peer.is_some_and(|p| may_take_frames(p.uid, ctx.own_euid));
     let state = active.as_ref().map_or(Busy::Idle, Active::state);
-    match route(req.kind, state, allowed) {
+    match route(req.kind, state) {
         Route::StartFeed { duration_secs } => start_feed(req, duration_secs, stream, active, ctx),
         Route::JoinFeed => {
             // Another auth attempt while the feed runs: the frames are already
@@ -1445,13 +1457,13 @@ mod tests {
     }
 
     #[test]
-    fn only_root_or_the_daemons_own_user_takes_frames() {
-        assert!(may_take_frames(0, 0), "root, to the root daemon");
-        assert!(!may_take_frames(1000, 0), "ukv, to the root daemon: forbidden");
-        assert!(!may_take_frames(65534, 0));
-        assert!(may_take_frames(1000, 1000), "a developer's own daemon");
-        assert!(may_take_frames(0, 1000), "root, to a developer's daemon");
-        assert!(!may_take_frames(1001, 1000));
+    fn only_root_or_the_daemons_own_user_is_served() {
+        assert!(may_use(0, 0), "root, to the root daemon");
+        assert!(!may_use(1000, 0), "ukv, to the root daemon: forbidden");
+        assert!(!may_use(65534, 0));
+        assert!(may_use(1000, 1000), "a developer's own daemon");
+        assert!(may_use(0, 1000), "root, to a developer's daemon");
+        assert!(!may_use(1001, 1000));
     }
 
     /// Every (kind, state, allowed) combination, against the rules.
@@ -1460,22 +1472,20 @@ mod tests {
         use Busy::*;
         let feed = Kind::Feed { duration_secs: 15 };
         let frames = Kind::Frames { count: 3 };
-        for allowed in [false, true] {
-            // the feed ignores the peer check entirely, and always proceeds
-            assert_eq!(route(feed, Idle, allowed), Route::StartFeed { duration_secs: 15 });
-            assert_eq!(route(feed, Feeding, allowed), Route::JoinFeed);
-            assert_eq!(
-                route(feed, Grabbing, allowed),
-                Route::PreemptThenFeed { duration_secs: 15 }
-            );
+        // a feed always proceeds
+        assert_eq!(route(feed, Idle), Route::StartFeed { duration_secs: 15 });
+        assert_eq!(route(feed, Feeding), Route::JoinFeed);
+        assert_eq!(route(feed, Grabbing), Route::PreemptThenFeed { duration_secs: 15 });
+        // frames yield to anything already running
+        assert_eq!(route(frames, Idle), Route::StartGrab { count: 3 });
+        assert_eq!(route(frames, Feeding), Route::Refuse(Refusal::BusyFeed));
+        assert_eq!(route(frames, Grabbing), Route::Refuse(Refusal::BusyGrab));
+        // forbidden is decided before the request is read, never here
+        for k in [feed, frames] {
+            for s in [Idle, Feeding, Grabbing] {
+                assert_ne!(route(k, s), Route::Refuse(Refusal::Forbidden));
+            }
         }
-        // forbidden wins over busy: a refused peer learns nothing about state
-        for s in [Idle, Feeding, Grabbing] {
-            assert_eq!(route(frames, s, false), Route::Refuse(Refusal::Forbidden));
-        }
-        assert_eq!(route(frames, Idle, true), Route::StartGrab { count: 3 });
-        assert_eq!(route(frames, Feeding, true), Route::Refuse(Refusal::BusyFeed));
-        assert_eq!(route(frames, Grabbing, true), Route::Refuse(Refusal::BusyGrab));
     }
 
     #[test]
@@ -1574,16 +1584,38 @@ mod tests {
     }
 
     #[test]
-    fn a_non_root_peer_is_refused_frames_before_any_hardware() {
+    fn a_non_root_peer_is_refused_anything_before_any_hardware() {
         let me = unsafe { libc::geteuid() };
         if me == 0 {
             return; // the check is about a non-root peer; root passes it
         }
-        // pretend to be the production (root) daemon: this test process is
-        // then a non-root peer
-        let (reply, holds) = serve(&frames_req(3).encode(), &ctx(0));
-        assert_eq!(reply, "error forbidden (frames are served to root only)");
-        assert!(!holds);
+        // Pretend to be the production (root) daemon: this test process is
+        // then a non-root peer. The trigger is refused like frames, and so is
+        // garbage: the peer is judged before a byte of the request is read.
+        let mut garbage = Request::default().encode();
+        garbage[0] = 0;
+        for req in [frames_req(3).encode(), Request::default().encode(), garbage] {
+            let (reply, holds) = serve(&req, &ctx(0));
+            assert_eq!(reply, "error forbidden (irfaced serves root only)");
+            assert!(!holds);
+        }
+    }
+
+    /// A refused peer that connects and never writes is answered at once: it
+    /// cannot hold the single-threaded loop for the read timeout.
+    #[test]
+    fn a_silent_non_root_peer_cannot_stall_the_loop() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (client, server) = UnixStream::pair().unwrap();
+        let t0 = Instant::now();
+        let mut active = None;
+        handle_connection(server, &mut active, &ctx(0));
+        assert!(t0.elapsed() < Duration::from_millis(500), "took {:?}", t0.elapsed());
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        assert!(line.starts_with("error forbidden"), "{line}");
     }
 
     #[test]

@@ -12,8 +12,9 @@ unpowered.
 ### Activation: systemd socket activation (not D-Bus, not `systemctl start`)
 
 - A socket at `/run/cement-ir/irfaced.sock` (root-only, `SocketMode=0600` —
-  the PAM helper runs as root via `seteuid`; **since dotfiles `b869fc9` it is
-  `0660 root:wheel`**, see the v2 section below). The **connect itself** is the
+  the PAM helper runs as root via `seteuid`; dotfiles `b869fc9` widened it to
+  `0660 root:wheel` for gtklock, and it went back to `0600` once gtklock face
+  auth was removed; see the v2 section below). The **connect itself** is the
   trigger: the first auth pays the cold start, the daemon then stays warm
   until the idle timeout. No D-Bus dependency (this machine's zero-dep
   choice), no per-auth `systemctl` round-trip.
@@ -85,11 +86,20 @@ gain u16 | exposure u32 | kind u8 (1 = frames) | count u8 (1..=10) | reserved[11
   - Or one `error <code> (<detail>)` line. The codes are `invalid`,
     `forbidden`, `busy`, `preempted`, `capture`, `torch`, `short` and
     `stopping`.
-- **Root only, by `SO_PEERCRED`** (or the daemon's own user, so a
-  developer's daemon on a private socket serves its developer). The socket is
-  `0660 root:wheel` for the trigger, so this check is all that stands
-  between a wheel process and IR face frames. The trigger keeps the socket's
-  own access.
+- **Root only, for every request, by `SO_PEERCRED`.** This is the owner's
+  decision of 2026-10-03: the sensor is exclusive to its controllers.
+  - The controllers are the PAM helper (root via `pam_exec seteuid`;
+    `SO_PEERCRED` reports the EUID) and `fid-gated` (root). Anything
+    unprivileged borrows through `fid-gated`, never this socket.
+  - The daemon's own user is also allowed, so a developer's daemon on a
+    private socket serves its developer.
+  - The peer is judged **before a byte of the request is read**. A refused
+    peer gets `error forbidden (irfaced serves root only)` at once, so it
+    cannot hold the single-threaded loop for the 2 s read timeout while an
+    auth waits.
+  - The socket's file mode says the same thing (`0600`, dotfiles `a8581a9`),
+    but a unit edit loosened it once (`b869fc9`), so the daemon enforces it
+    itself.
 - **Auth always wins.** A frames request during an auth feed is refused
   `busy` without touching the sensor. An auth trigger during a frames capture
   ends it at once: its caller gets `preempted` and the feed starts. The
