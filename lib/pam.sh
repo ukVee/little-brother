@@ -104,7 +104,7 @@ cmd_enable() {
     # The never-touch check comes FIRST, before the root check: `pam enable su`
     # should tell you it will never happen, not that you forgot sudo.
     for n in "${PAM_NEVER[@]}"; do
-        [[ $svc == "$n" ]] && die "refusing to touch $PAM_DIR/$svc -- it is on the never-touch list (the lockout surface). See PAM_NEVER in lib/pam-policy.sh for why."
+        [[ $svc == "$n" ]] && die "refusing to touch $PAM_DIR/$svc -- it is on the never-touch list (the lockout surface, or the owner session's lock screen). See PAM_NEVER in lib/pam-policy.sh for why."
     done
     # Root is needed to write the real auth path, not to write a test dir.
     [[ $PAM_DIR == /etc/pam.d ]] && need_root pam

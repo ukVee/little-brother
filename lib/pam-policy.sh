@@ -16,7 +16,14 @@
 #   polkit-1      -- does not exist here; polkit currently falls through to
 #                    'other'. Creating it is its own decision with its own blast
 #                    radius, so it is refused rather than quietly created.
-PAM_NEVER=(login system-login system-local-login su system-auth other polkit-1)
+#   gtklock       -- NOT a lockout risk; a policy line. The owner session's lock
+#                    screen must never open on a face (garden
+#                    projects/facial-id-defender: "face alone never reaches L2";
+#                    owner's decision 2026-10-03). It was enabled once (D22) and
+#                    never worked: gtklock runs as ukv, so the pam_exec seteuid
+#                    helper cannot get root and starts no feed. Refused here so
+#                    nobody "fixes" it back on.
+PAM_NEVER=(login system-login system-local-login su system-auth other polkit-1 gtklock)
 
 # Where the PAM service files live. CEMENT_IR_PAM_DIR overrides it so the stanza
 # `pam enable` generates can be verified end to end without root and without

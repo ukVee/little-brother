@@ -240,8 +240,8 @@ for n in "${PAM_NEVER[@]}"; do
     done
 done
 (( ${#dirty[@]} == 0 )) \
-    && ok "never-touch services clean" "${#PAM_NEVER[@]} checked (login, su, system-auth, other, polkit-1, ...)" \
-    || bad "never-touch services clean" "face auth found on the lockout surface: ${dirty[*]}"
+    && ok "never-touch services clean" "${#PAM_NEVER[@]} checked (login, su, system-auth, other, polkit-1, gtklock, ...)" \
+    || bad "never-touch services clean" "face auth found where it must never be: ${dirty[*]} (sudo $ROOT/cement-ir pam disable <service>)"
 
 pacnew=$(ls "$PAM_DIR"/*.pacnew 2>/dev/null | tr '\n' ' ')
 [[ -z $pacnew ]] && ok "no .pacnew in pam.d" || bad "no .pacnew in pam.d" "$pacnew"
