@@ -12,7 +12,8 @@ unpowered.
 ### Activation: systemd socket activation (not D-Bus, not `systemctl start`)
 
 - A socket at `/run/cement-ir/irfaced.sock` (root-only, `SocketMode=0600` —
-  the PAM helper runs as root via `seteuid`). The **connect itself** is the
+  the PAM helper runs as root via `seteuid`; **since dotfiles `b869fc9` it is
+  `0660 root:wheel`**, see the v2 section below). The **connect itself** is the
   trigger: the first auth pays the cold start, the daemon then stays warm
   until the idle timeout. No D-Bus dependency (this machine's zero-dep
   choice), no per-auth `systemctl` round-trip.
@@ -55,6 +56,64 @@ Done-when #1's measurement is built into the tool.
 Policy checks run **before any hardware is touched** (the slice 005 lesson):
 duration 1..=120 (the owner's ceiling), steps 0..=3 (0 = no illuminator,
 legal for a feed), gain 1..=1023. A refusal is one line, needs no root.
+
+### Protocol v2: the `frames` verb (fid-gate slice 003, 2026-10-03)
+
+`facial-id-defender`'s gate judges presence from IR frames, and the sensor
+keeps one owner. So v2 lets a **root** caller ask for N frames back on the
+socket instead of on the loopback. Same capture path, same operating point,
+same teardown. Recognition stays out of this process.
+
+```
+magic u32 | version u32 (2) | duration_secs u32 (0) | current_steps u8 |
+gain u16 | exposure u32 | kind u8 (1 = frames) | count u8 (1..=10) | reserved[11] (zero)
+```
+
+- **A feed is still sent as v1**, byte for byte. The PAM helper's request is
+  unchanged, so a warm daemon still running the old binary keeps serving auth
+  (`make install` stops it anyway). v1 never checked bytes 19..32 and still
+  doesn't. v2 is strict: reserved bytes zero, `count` only on frames,
+  `duration` only on a feed.
+- **Reply:** `frames <n>\n`, then `n` records of a 24-byte header (`len u32 |
+  width u16 | height u16 | mono_ns u64 | mean f32 | darkness f32`, LE) and
+  `len` bytes of 640x480 8-bit grey (the same `>> 2` the loopback gets).
+  - `mono_ns` is `CLOCK_MONOTONIC` when the daemon dequeued the frame.
+  - `darkness` is howdy's: 100 × the share of pixels in the first of 8
+    histogram bins over 0..256. It was read off `howdy-compare`'s
+    `cv::calcHist` call, so the same frame gets the same number in
+    `pam_howdy`.
+  - Or one `error <code> (<detail>)` line. The codes are `invalid`,
+    `forbidden`, `busy`, `preempted`, `capture`, `torch`, `short` and
+    `stopping`.
+- **Root only, by `SO_PEERCRED`** (or the daemon's own user, so a
+  developer's daemon on a private socket serves its developer). The socket is
+  `0660 root:wheel` for the trigger, so this check is all that stands
+  between a wheel process and IR face frames. The trigger keeps the socket's
+  own access.
+- **Auth always wins.** A frames request during an auth feed is refused
+  `busy` without touching the sensor. An auth trigger during a frames capture
+  ends it at once: its caller gets `preempted` and the feed starts. The
+  capture is driven tick by tick from the event loop like a feed, so the
+  trigger waits at most one frame interval, plus the teardown.
+- **Bounded.** The capture must finish within `FRAMES_DEADLINE_MS` (2 s), or
+  it gets `short`, or `capture` with zero frames. That is well inside the
+  torch watchdog, so there is no MODE refresh. The reply write is bounded by
+  `SEND_DEADLINE_MS` (250 ms) in total, so a client that never reads cannot
+  hold up an auth. The torch is out and the streams are off **before** the
+  reply is written.
+- **Fault accounting is shared** (`faults::WEDGE`, the a8224c2 rule).
+  - Counted: a wedge-signature errno, zero frames by the deadline with
+    nothing else to explain it, and teardown errors.
+  - Not counted: `EBUSY`, a refusal, a preemption or a short capture. None of
+    them can arm the rebind.
+- **No frame reaches disk or the journal.** The journal gets counts and
+  timings only, not even a frame's mean. The daemon sets `RLIMIT_CORE` to 0:
+  `systemd-coredump` honours that and stores nothing, while
+  `PR_SET_DUMPABLE` would not, under `fs.suid_dumpable = 2`.
+
+`cement-ir-rt irfaced frames --count 3` is the reference client. It prints
+each frame's offset, mean and darkness, re-derives both from the pixels to
+check the transfer, and drops the pixels.
 
 ### Teardown ordering (inherited from `irface.py cmd_feed`)
 

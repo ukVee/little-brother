@@ -22,6 +22,8 @@
 //! - `irfaced daemon` — run the socket-activated face-capture service.
 //! - `irfaced trigger` — the one-shot trigger client (what the PAM helper
 //!   calls); always exits 0.
+//! - `irfaced frames` — ask for N frames on the socket (root only); prints
+//!   their metadata, never their pixels.
 //! - `irfaced resolve` — resolve + configure the graph by entity name and
 //!   print it, without streaming (diagnostic).
 //! - `soak N` — run N full capture cycles back to back and report wedges,
@@ -153,6 +155,29 @@ enum IrfacedCmd {
         #[arg(long, default_value = irfaced::SOCKET_PATH)]
         socket: String,
     },
+    /// Ask the daemon for N frames on the socket (protocol v2; root callers
+    /// only). Prints each frame's timestamp, mean and howdy darkness, and
+    /// drops the pixels. Exits non-zero on any error reply.
+    Frames {
+        /// how many frames (1..=10)
+        #[arg(long, default_value_t = irfaced::DEFAULT_FRAMES)]
+        count: u8,
+        /// torch current in 32.5 mA steps (0 = no illuminator; 1..=3)
+        #[arg(long, default_value_t = irfaced::DEFAULT_STEPS)]
+        steps: u8,
+        /// sensor analogue_gain (1..=1023)
+        #[arg(long, default_value_t = irfaced::DEFAULT_GAIN)]
+        gain: u16,
+        /// sensor exposure
+        #[arg(long, default_value_t = irfaced::DEFAULT_EXPOSURE)]
+        exposure: u32,
+        /// how long to wait for the reply before giving up
+        #[arg(long, default_value_t = 5)]
+        timeout: u64,
+        /// the daemon socket (default /run/cement-ir/irfaced.sock)
+        #[arg(long, default_value = irfaced::SOCKET_PATH)]
+        socket: String,
+    },
     /// Resolve the graph by entity name, configure it, print it — no
     /// streaming. The verification surface for by-name resolution.
     Resolve {
@@ -259,6 +284,9 @@ fn main() -> ExitCode {
             IrfacedCmd::Daemon => irfaced::daemon_run(),
             IrfacedCmd::Trigger { duration, steps, gain, exposure, timeout, socket } => {
                 irfaced::trigger_run(duration, steps, gain, exposure, timeout, &socket)
+            }
+            IrfacedCmd::Frames { count, steps, gain, exposure, timeout, socket } => {
+                irfaced::frames_run(count, steps, gain, exposure, timeout, &socket)
             }
             IrfacedCmd::Resolve { media } => irfaced::resolve_run(&media),
         },
