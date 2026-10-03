@@ -274,9 +274,12 @@ if [[ -r /etc/howdy/config.ini ]]; then
     # journal, pacman.log) until 2026-10-03, and a sudo face auth failed at
     # darkness 76.90 against 75 in between. Nothing checked the value, so a
     # decision that never reached the file looked like one that had "reverted".
+    # The owner set the official value to 79 on 2026-10-03 (the 09-27 decision
+    # said 80). The measured production frames read 76.05 and 76.90, so 79
+    # clears them by 2.1-2.95 points.
     dt=$(sed -n 's/^dark_threshold *= *//p' /etc/howdy/config.ini)
-    [[ $dt == 80 ]] && ok "howdy dark_threshold" "$dt" \
-        || bad "howdy dark_threshold" "'${dt:-unset}' -- want 80 (decision-raise-howdy-dark-threshold; the production frame reads ~76-77)"
+    [[ $dt == 79 ]] && ok "howdy dark_threshold" "$dt" \
+        || bad "howdy dark_threshold" "'${dt:-unset}' -- want 79 (decision-raise-howdy-dark-threshold; the production frame reads ~76-77)"
 else
     skip "howdy device_path" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
     skip "no .pacnew in /etc/howdy" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
