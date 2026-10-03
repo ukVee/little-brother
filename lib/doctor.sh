@@ -267,9 +267,18 @@ if [[ -r /etc/howdy/config.ini ]]; then
     hp=$(ls /etc/howdy/*.pacnew 2>/dev/null | tr '\n' ' ')
     [[ -z $hp ]] && ok "no .pacnew in /etc/howdy" "the local dark_threshold edit is unchallenged" \
         || bad "no .pacnew in /etc/howdy" "$hp -- upstream defaults moved; diff it before merging, the local edit is deliberate"
+    # The edit itself, not just the absence of a challenge to it. The raise was
+    # decided 2026-09-27 but no write to config.ini appears anywhere (sudo's
+    # journal, pacman.log) until 2026-10-03, and a sudo face auth failed at
+    # darkness 76.90 against 75 in between. Nothing checked the value, so a
+    # decision that never reached the file looked like one that had "reverted".
+    dt=$(sed -n 's/^dark_threshold *= *//p' /etc/howdy/config.ini)
+    [[ $dt == 80 ]] && ok "howdy dark_threshold" "$dt" \
+        || bad "howdy dark_threshold" "'${dt:-unset}' -- want 80 (decision-raise-howdy-dark-threshold; the production frame reads ~76-77)"
 else
     skip "howdy device_path" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
     skip "no .pacnew in /etc/howdy" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
+    skip "howdy dark_threshold" "/etc/howdy is 0750 root:root -- run doctor with sudo to read it"
 fi
 fi
 
