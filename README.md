@@ -31,10 +31,14 @@ One entry point (`cement-ir`) over a path the kernel does not assemble for us:
   programs its WLED block and the owner is the only writer.
 - **The PAM helper** (`/usr/local/bin/howdy-ir-pam`) is the `pam_exec` trigger
   that asks the on-demand face-capture daemon for a frame stream before
-  `pam_howdy.so` runs. Bombadil-sourced since slice 006 from
-  `~/dotfiles/src/system/cement-ir/howdy-ir-pam`; the daemon it triggers is
-  `cement-ir-rt irfaced` (systemd units `irfaced.socket` + `irfaced.service`,
-  also in `~/dotfiles/src/system/systemd/irfaced/`). Design:
+  `pam_howdy.so` runs. Its source is
+  `~/dotfiles/src/system/cement-ir/howdy-ir-pam` (since slice 006); the daemon
+  it triggers is `cement-ir-rt irfaced` (systemd units `irfaced.socket` +
+  `irfaced.service`, also in `~/dotfiles/src/system/systemd/irfaced/`). All of
+  them, and the dw9719 watchdog's hook + unit, are installed as **root-owned
+  copies** by `sudo dotfiles-deploy-system` (2026-10-03). Before that they were
+  bombadil symlinks into `~/dotfiles`, which let any process running as ukv edit
+  what root runs on the next sudo (garden `services/notes/001`). Design:
   `docs/irfaced-design.md`.
 - **`lib/pam-policy.sh`** is the one place `pam` and `doctor` agree on face-auth
   policy (slice 010): the `PAM_NEVER` lockout surface that `pam enable` refuses,
@@ -98,9 +102,10 @@ docs/              repo-local records that are not garden material
 **No file in this repo hardcodes its own install path.** The August tree wrote
 `/home/ukv/cement-ir` into 16 files, so one `mv` of the directory broke face auth
 silently. Since slice 006 there is no exception left: the installed PAM helper
-carries no repo path at all (it is a bombadil symlink whose one job is to
-trigger the daemon over a socket), and `cement-ir doctor` checks that the
-installed copy really is that symlink. Where a path *must* cross the boundary
+carries no repo path at all (its one job is to trigger the daemon over a
+socket), and `cement-ir doctor` checks that the installed copy is root-owned,
+not a symlink, and matches its `~/dotfiles` source (`deployed_state` in
+`lib/common.sh`). Where a path *must* cross the boundary
 into the Rust core — the fault handler `cement-ir soak` calls — the shell entry
 point passes it in (`--recover-cmd`), so the binary knows no repo path either.
 
@@ -115,6 +120,6 @@ Not done yet, and known: `cement-ir-rt` is not yet installed to `/usr/local/bin`
 build), and the socket deployment waits on it. The wedge recovery came off the
 auth path in slices 006/007; the soak that proves it is `cement-ir soak 20`,
 whose run **with the illuminator** needs root and is a deferred check. The
-dw9719 watchdog (slice 008) is built but **not deployed**: the pacman hook and
-the boot unit are bombadil-sourced and wait on the same `bombadil link` + root
-session, which `doctor` reports as two FAILs until it happens.
+dw9719 watchdog (slice 008) is the pacman hook and the boot unit, installed
+by `sudo dotfiles-deploy-system` like the rest of the system files; `doctor`
+FAILs either one if it is missing, a symlink, or not root-owned.

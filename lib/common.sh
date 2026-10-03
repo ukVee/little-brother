@@ -7,7 +7,7 @@
 # longer existed, and because it is `auth optional` and always exits 0, sudo
 # simply stopped trying the camera. Every path below is derived from where this
 # file actually is, so moving the repo again costs nothing. (Since slice 006 the
-# PAM helper is bombadil-sourced and carries no repo path at all; nothing
+# PAM helper comes from ~/dotfiles and carries no repo path at all; nothing
 # outside this tree hardcodes it.)
 
 ROOT=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
@@ -30,6 +30,37 @@ real_home() {
     local u; u=$(real_user)
     local h; h=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
     printf '%s\n' "${h:-$HOME}"
+}
+
+# System files (the units, the pam_exec helper, the pacman hook, the
+# loopback confs) are root-owned COPIES of ~/dotfiles/src/system/, installed
+# by `sudo dotfiles-deploy-system` from its deploy.manifest. Until 2026-10-03
+# they were bombadil symlinks into ~/dotfiles, which let any ukv process edit
+# what root runs: the helper runs as root on every sudo and gtklock unlock
+# (garden: services/notes/001, projects/facial-id-defender P0a). So a symlink,
+# a non-root owner, a group/other-writable mode or an ACL is a FAIL even when
+# the content is right. Content compares effective lines only: a reworded
+# comment is not drift, and a check that cries wolf over one gets ignored.
+deployed_state() {   # deployed_state <target> <source relative to src/system/>
+    local t=$1 rel=$2 s
+    s="$(real_home)/dotfiles/src/system/$2"
+    if [[ -L $t ]]; then
+        echo "a symlink -> $(readlink "$t") (root would run a file ukv can edit) -- sudo dotfiles-deploy-system"
+        return 1
+    fi
+    [[ -e $t ]] || { echo "not installed -- sudo dotfiles-deploy-system"; return 1; }
+    [[ $(stat -c %U "$t") == root ]] \
+        || { echo "owned by $(stat -c %U "$t"), not root -- sudo dotfiles-deploy-system"; return 1; }
+    [[ -z $(find "$t" -perm /022 2>/dev/null) ]] \
+        || { echo "group/other-writable ($(stat -c %A "$t")) -- sudo dotfiles-deploy-system"; return 1; }
+    [[ -z $(getfacl -s -p "$t" 2>/dev/null) ]] \
+        || { echo "carries an ACL -- sudo dotfiles-deploy-system"; return 1; }
+    if [[ ! -r $s ]]; then
+        echo "root-owned copy, but ~/dotfiles/src/system/$rel is missing"; return 1
+    fi
+    diff -q <(grep -vE '^\s*(#|$)' "$t" 2>/dev/null) <(grep -vE '^\s*(#|$)' "$s") >/dev/null \
+        || { echo "differs from ~/dotfiles/src/system/$rel -- sudo dotfiles-deploy-system"; return 1; }
+    echo "root-owned copy, matches ~/dotfiles/src/system/$rel"
 }
 
 need_root() {   # need_root <subcommand>

@@ -94,6 +94,16 @@ actual reason — the exact opposite of the old `/dev/null` + `/tmp` discard.
 
 ### Bombadil
 
+> **Superseded 2026-10-03.** These files are no longer bombadil symlinks. A
+> symlink from `/etc` or `/usr/local/bin` into `~/dotfiles` (plus the ACLs
+> bombadil needed to create it) let any process running as ukv edit what root
+> runs. The helper runs as root on every sudo, so editing it was a route to
+> root with no password. They are now **root-owned copies** installed by
+> `sudo dotfiles-deploy-system` from `~/dotfiles/src/system/deploy.manifest`,
+> and `doctor` fails a symlink (`deployed_state`, `lib/common.sh`). The source
+> paths below are unchanged. Garden: `services/notes/001`,
+> `projects/facial-id-defender/` P0a.
+
 The unit, the socket, the helper and both v4l2loopback confs become
 bombadil-sourced (precedent: `acpi_lid_action → /usr/local/bin/lid-close.sh`):
 

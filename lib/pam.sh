@@ -27,13 +27,16 @@
 #   cement-ir pam disable [service]         restores the .pre-howdy backup
 #   cement-ir pam set-device [/dev/videoN]  point howdy's config.ini at the loopback
 #
-# The helper itself is bombadil-sourced since slice 006
-# (~/dotfiles/src/system/cement-ir/howdy-ir-pam -> /usr/local/bin/howdy-ir-pam);
-# `bombadil link` is its installer, `cement-ir doctor` verifies it. There is no
+# The helper's source is ~/dotfiles/src/system/cement-ir/howdy-ir-pam (since
+# slice 006). Since 2026-10-03 it is installed as a ROOT-OWNED COPY by
+# `sudo dotfiles-deploy-system`, not a bombadil symlink: root runs it on every
+# face auth, and a link into ~/dotfiles let any ukv process edit it (garden
+# services/notes/001). `cement-ir doctor` verifies it. There is no
 # install-helper anymore.
 #
-# PAM SERVICE FILES ARE THE ONE /etc EXCEPTION TO THE BOMBADIL RULE (slice 010).
-# Locked decision 10 says files in /etc are bombadil-sourced. /etc/pam.d/* stays
+# PAM SERVICE FILES ARE THE ONE /etc EXCEPTION TO THE DOTFILES RULE (slice 010).
+# Locked decision 10 says files in /etc come from ~/dotfiles (bombadil-linked
+# then; root-owned copies via dotfiles-deploy-system since 2026-10-03). /etc/pam.d/* stays
 # hand-edited with a .pre-howdy backup, for two different reasons per file:
 #   - /etc/pam.d/sudo IS in pacman's backup array, so a symlink would collect a
 #     .pacnew on every sudo upgrade (the original exception).
@@ -84,23 +87,13 @@ cmd_status() {
         echo "  not readable as $(id -un)"
     fi
     [[ -f $f.pre-howdy ]] && echo "  backup present: $f.pre-howdy"
-    echo "=== helper (bombadil-sourced since slice 006) ==="
-    if [[ -e $HELPER ]]; then
-        if [[ -L $HELPER ]]; then
-            real=$(readlink -f "$HELPER")
-            case $real in
-                "$(real_home)"/dotfiles/.dots/*)
-                    grep -q 'cement-ir-rt irfaced trigger' "$HELPER" \
-                        && echo "  $HELPER -> $real (bombadil-managed)" \
-                        || echo "  !! $HELPER does not carry the trigger call -- bombadil link"
-                    ;;
-                *) echo "  !! $HELPER is a symlink outside ~/dotfiles/.dots: $real" ;;
-            esac
-        else
-            echo "  !! $HELPER is a hand-installed copy, not a bombadil symlink -- run: bombadil link"
-        fi
+    echo "=== helper (a root-owned copy of ~/dotfiles/src/system/cement-ir/howdy-ir-pam) ==="
+    if why=$(deployed_state "$HELPER" cement-ir/howdy-ir-pam); then
+        grep -q 'irfaced trigger' "$HELPER" \
+            && echo "  $HELPER: $why" \
+            || echo "  !! $HELPER does not carry the irfaced trigger call"
     else
-        echo "  $HELPER not installed -- run: bombadil link"
+        echo "  !! $HELPER: $why"
     fi
     echo "=== services carrying face auth ==="
     cmd_list | sed 's/^/  /' || echo "  (none)"
@@ -117,7 +110,7 @@ cmd_enable() {
     [[ $PAM_DIR == /etc/pam.d ]] && need_root pam
     [[ -f $f ]] || die "$f does not exist (do not create a PAM service file to add face auth to it)"
     if [[ $PAM_DIR == /etc/pam.d && ! -x $HELPER ]]; then
-        die "$HELPER is not installed -- run: bombadil link (one-time root ACL: sudo setfacl -m u:ukv:rwx /usr/local/bin)"
+        die "$HELPER is not installed -- run: sudo dotfiles-deploy-system"
     fi
     touch "$HELPER_LOG" 2>/dev/null && chmod 644 "$HELPER_LOG" 2>/dev/null || true
     if grep -q pam_howdy "$f"; then

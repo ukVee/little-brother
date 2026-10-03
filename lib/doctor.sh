@@ -90,22 +90,30 @@ else
 fi
 
 # The watchdog around the carry (slice 008): the check that runs without being
-# remembered. Both are bombadil-sourced and Exec the INSTALLED binary, so their
-# absence is a deployment gap, not a code gap.
+# remembered. Both Exec the INSTALLED binary, so their absence is a deployment
+# gap, not a code gap. Both are run by root, so they must be root-owned copies
+# (deployed_state, lib/common.sh), never links into ~/dotfiles.
 HOOK=/etc/pacman.d/hooks/90-cement-ir-dw9719.hook
-if [[ -L $HOOK ]]; then
-    ok "pacman hook" "bombadil-managed ($(readlink -f "$HOOK"))"
-elif [[ -e $HOOK ]]; then
-    bad "pacman hook" "present but not a bombadil symlink -- run: bombadil link"
+if why=$(deployed_state "$HOOK" pacman-hooks/90-cement-ir-dw9719.hook); then
+    ok "pacman hook" "$why"
 else
-    bad "pacman hook" "absent -- a kernel upgrade can break the carry unwatched (sudo mkdir -p ${HOOK%/*}; bombadil link)"
+    bad "pacman hook" "$why"
 fi
+for u in irfaced.socket:systemd/irfaced/irfaced.socket \
+         irfaced.service:systemd/irfaced/irfaced.service \
+         cement-ir-dkms-check.service:systemd/cement-ir/cement-ir-dkms-check.service; do
+    if why=$(deployed_state "/etc/systemd/system/${u%%:*}" "${u#*:}"); then
+        ok "${u%%:*}" "$why"
+    else
+        bad "${u%%:*}" "$why"
+    fi
+done
 if systemctl cat cement-ir-dkms-check.service >/dev/null 2>&1; then
     systemctl is-enabled cement-ir-dkms-check.service >/dev/null 2>&1 \
         && ok "boot check unit" "enabled" \
         || bad "boot check unit" "installed but not enabled -- sudo systemctl enable cement-ir-dkms-check.service"
 else
-    bad "boot check unit" "cement-ir-dkms-check.service not installed (bombadil link + daemon-reload)"
+    bad "boot check unit" "cement-ir-dkms-check.service not installed (sudo dotfiles-deploy-system)"
 fi
 
 echo "=== media graph (resolved by entity name -- node numbers move) ==="
@@ -137,55 +145,41 @@ if [[ -e /dev/video20 ]]; then
 else
     bad "/dev/video20" "absent -- sudo $ROOT/cement-ir loopback install"
 fi
-# Compare the EFFECTIVE lines only -- a reworded comment is not a drift, and a
-# check that cries wolf over one gets ignored when it matters. The source of
-# truth moved to ~/dotfiles with slice 006 (bombadil-sourced).
-effective() { grep -vE '^\s*(#|$)' "$1" 2>/dev/null; }
-DOTS_HOME=$(real_home)
-DOTS_SYSTEM="$DOTS_HOME/dotfiles/src/system"
-for f in /etc/modprobe.d/v4l2loopback.conf /etc/modules-load.d/v4l2loopback.conf; do
-    if [[ -f $f ]]; then
-        if diff -q <(effective "$f") <(effective "$DOTS_SYSTEM/${f#/etc/}") >/dev/null; then
-            ok "${f#/etc/}" "matches ~/dotfiles"
-        else
-            bad "${f#/etc/}" "differs from $DOTS_SYSTEM/${f#/etc/} -- bombadil link"
-        fi
+# The loopback confs: modprobe reads them as root (and modprobe.d can carry
+# `install` lines that RUN as root), so the same root-owned-copy rule applies.
+for f in modprobe.d/v4l2loopback.conf modules-load.d/v4l2loopback.conf; do
+    if why=$(deployed_state "/etc/$f" "$f"); then
+        ok "$f" "$why"
     else
-        bad "${f#/etc/}" "not installed -- bombadil link"
+        bad "$f" "$why"
     fi
 done
 
 if (( ! QUICK )); then
 echo "=== PAM ==="
-# The helper is bombadil-sourced since slice 006: /usr/local/bin/howdy-ir-pam
-# is a symlink into ~/dotfiles/.dots/ carrying the trigger call. There is no
-# baked-in repo path anymore, so there is nothing to go stale -- but the
-# pre-slice-006 copies (hand-installed, hardcoded path) are still out there
-# and must be caught until D2 deploys the new helper.
-if [[ -e /usr/local/bin/howdy-ir-pam ]]; then
-    if [[ -L /usr/local/bin/howdy-ir-pam ]]; then
-        real=$(readlink -f /usr/local/bin/howdy-ir-pam)
-        # The helper reaches the binary through $RT, so the literal string
-        # "cement-ir-rt irfaced trigger" is never in it -- this grep FAILed a
-        # correct bombadil deploy on 2026-09-26. Assert what is really there:
-        # the installed path it resolves, and the trigger it issues.
-        if [[ $real == "$DOTS_HOME"/dotfiles/.dots/* ]] \
-           && grep -q '^RT=/usr/local/bin/cement-ir-rt$' /usr/local/bin/howdy-ir-pam \
-           && grep -q 'irfaced trigger' /usr/local/bin/howdy-ir-pam; then
-            ok "installed helper" "bombadil-managed ($real)"
-            # Slice 007: the rebind is a fault handler, never a pre-auth step.
-            # This is the grep that keeps it that way.
-            grep -qE 'sensor-recover|/(un)?bind' /usr/local/bin/howdy-ir-pam \
-                && bad "helper has no rebind" "the installed helper still recovers on the happy path" \
-                || ok "helper has no rebind" "no recovery on the pre-auth path"
-        else
-            bad "installed helper" "not the bombadil helper ($real) -- run: bombadil link"
-        fi
+# The helper runs as root (pam_exec seteuid) on every face auth, so it must be
+# a root-owned copy of ~/dotfiles/src/system/cement-ir/howdy-ir-pam. Until
+# 2026-10-03 it was a bombadil symlink into ~/dotfiles, i.e. any ukv process
+# could edit what root runs on the next sudo (garden services/notes/001).
+HELPER_PATH=/usr/local/bin/howdy-ir-pam
+if why=$(deployed_state "$HELPER_PATH" cement-ir/howdy-ir-pam); then
+    # The helper reaches the binary through $RT, so the literal string
+    # "cement-ir-rt irfaced trigger" is never in it -- this grep FAILed a
+    # correct deploy on 2026-09-26. Assert what is really there: the
+    # installed path it resolves, and the trigger it issues.
+    if grep -q '^RT=/usr/local/bin/cement-ir-rt$' "$HELPER_PATH" \
+       && grep -q 'irfaced trigger' "$HELPER_PATH"; then
+        ok "installed helper" "$why"
+        # Slice 007: the rebind is a fault handler, never a pre-auth step.
+        # This is the grep that keeps it that way.
+        grep -qE 'sensor-recover|/(un)?bind' "$HELPER_PATH" \
+            && bad "helper has no rebind" "the installed helper still recovers on the happy path" \
+            || ok "helper has no rebind" "no recovery on the pre-auth path"
     else
-        bad "installed helper" "hand-installed copy, not a bombadil symlink -- run: bombadil link"
+        bad "installed helper" "does not carry the irfaced trigger -- check ~/dotfiles/src/system/cement-ir/howdy-ir-pam"
     fi
 else
-    bad "installed helper" "/usr/local/bin/howdy-ir-pam missing (face auth cannot trigger the daemon)"
+    bad "installed helper" "$why"
 fi
 # Every service carrying face auth, not just sudo (slice 010 #4). The set is
 # {sudo} U {whatever pam.sh reports}, so sudo going missing is still a FAIL

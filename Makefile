@@ -40,9 +40,10 @@ install:
 	@test "$$(id -u)" = 0 || { \
 	  echo "make install: needs root (the binary is root-owned; it sits on the sudo auth path)."; \
 	  echo "      sudo make -C $(CURDIR) install"; \
-	  echo "  Refusing early ON PURPOSE: /usr/local/bin is ukv-writable by ACL here, so"; \
-	  echo "  \`install -o root\` as a normal user COPIES the file and only then fails on the"; \
-	  echo "  chown -- leaving a 0600 non-executable half-install on the auth path."; \
+	  echo "  Refusing early ON PURPOSE: wherever a user can write the target dir (an ACL"; \
+	  echo "  grant, as /usr/local/bin had here until 2026-10-03), \`install -o root\` as"; \
+	  echo "  that user COPIES the file and only then fails on the chown -- leaving a 0600"; \
+	  echo "  non-executable half-install on the auth path."; \
 	  exit 1; \
 	}
 	@test -x $(RT) || { \

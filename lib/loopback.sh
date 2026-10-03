@@ -12,10 +12,12 @@
 # looks absent whenever the daemon is not feeding. Do not read an absent
 # /dev/video20 as a broken loopback.
 #
-# Since slice 006 the two conf files are bombadil-sourced from ~/dotfiles/src/system
-# ({modprobe,modules-load}.d/v4l2loopback.conf); `bombadil link` is the installer
-# and this verb verifies + reloads. (One-time root ACL if bombadil cannot write
-# the targets: sudo setfacl -m u:ukv:rwx /etc/modprobe.d /etc/modules-load.d.)
+# The two conf files come from ~/dotfiles/src/system
+# ({modprobe,modules-load}.d/v4l2loopback.conf). Since 2026-10-03 their
+# installer is `sudo dotfiles-deploy-system` (root-owned copies), and this verb
+# verifies + reloads. NEVER grant ukv an ACL on /etc/modprobe.d again so a
+# user-side tool can write there: a modprobe.d `install` line runs as root
+# (garden services/notes/001).
 set -uo pipefail
 
 source "$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)/common.sh"
@@ -31,7 +33,7 @@ for f in /etc/modules-load.d/v4l2loopback.conf /etc/modprobe.d/v4l2loopback.conf
     if [[ -f $f ]]; then
         echo "  ok: $f"
     else
-        echo "  MISSING: $f -- run: bombadil link"
+        echo "  MISSING: $f -- run: sudo dotfiles-deploy-system"
         missing=1
     fi
 done
