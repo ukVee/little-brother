@@ -53,7 +53,8 @@ install:
 	  echo "  then:  sudo make -C $(CURDIR) install"; \
 	  exit 1; \
 	}
-	@stale=$$(find crates -name '*.rs' -newer $(RT) -print -quit 2>/dev/null); \
+	@# crates/*/tests/ is pruned: integration tests never reach the binary.
+	@stale=$$(find crates -path '*/tests' -prune -o -name '*.rs' -newer $(RT) -print -quit 2>/dev/null); \
 	  test -z "$$stale" || { \
 	    echo "make install: $(RT) is STALE ($$stale is newer)."; \
 	    echo "  Rebuild as your user:  make -C $(CURDIR) build"; \

@@ -60,7 +60,9 @@ echo "=== runtime core (Rust, slice 013) ==="
 RT=/usr/local/bin/cement-ir-rt
 if [[ -x $RT ]]; then
     if [[ -d $ROOT/crates ]]; then
-        newer=$(find "$ROOT/crates" -name '*.rs' -newer "$RT" -print -quit 2>/dev/null)
+        # Integration tests (crates/*/tests/) are never compiled into the
+        # binary, so editing one must not read as a stale install.
+        newer=$(find "$ROOT/crates" -path '*/tests' -prune -o -name '*.rs' -newer "$RT" -print -quit 2>/dev/null)
         if [[ -n $newer ]]; then
             bad "runtime binary" "stale: $(basename "$newer") newer than $RT -- make -C $ROOT build && sudo make -C $ROOT install"
         else

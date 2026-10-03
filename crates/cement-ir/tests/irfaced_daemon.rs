@@ -10,6 +10,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 struct Daemon {
@@ -30,7 +31,7 @@ fn spawn(name: &str) -> Daemon {
     let dir = std::env::temp_dir().join(format!("irfaced-test-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("irfaced.sock");
-    let child = Command::new(env!("CARGO_BIN_EXE_cement-ir-rt"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cement-ir-rt"))
         .args(["irfaced", "daemon"])
         .env("IRFACED_SOCKET", &socket)
         .env("IRFACED_MEDIA", dir.join("no-media"))
@@ -40,13 +41,31 @@ fn spawn(name: &str) -> Daemon {
         .env_remove("LISTEN_FDS")
         .env_remove("LISTEN_PID")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let t0 = Instant::now();
-    while !socket.exists() {
-        assert!(t0.elapsed() < Duration::from_secs(5), "the daemon never bound {socket:?}");
-        std::thread::sleep(Duration::from_millis(10));
+    // Ready means LISTENING, which the daemon reports once `bind_listener`
+    // has returned. The socket file existing is not enough: std's
+    // `UnixListener::bind` is bind() then listen(), and a connect() in between
+    // is refused. Waiting on the file is the most likely cause of the one
+    // failure seen in ~75 runs on 2026-10-03 (its output was not kept, so
+    // that is inference, not a capture). A thread keeps draining stderr
+    // afterwards so the daemon can never block on a full pipe.
+    let (tx, rx) = mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) if line.contains("listening on") => break,
+            Ok(_) => {}
+            Err(_) => panic!("the daemon never reported listening on {socket:?}"),
+        }
     }
     Daemon { child, socket, dir }
 }
