@@ -126,9 +126,10 @@ fn node_or_err(dev: (u32, u32), what: &str) -> Result<String, Error> {
 /// Set gain + exposure immediately before capture — **every time**.
 ///
 /// `analogue_gain` reverts to its minimum of 16, which renders a lit room and
-/// a dark one identically (~mean 16 of 1023). Nothing runs auto-exposure on
-/// this path, so if the caller does not set it, nothing does. The
-/// 2026-08-21 trap; garden `hardware/notes/005`.
+/// a dark one identically (~mean 16 of 1023). Nothing upstream runs
+/// auto-exposure on this path, so if the caller does not set it, nothing
+/// does. The 2026-08-21 trap; garden `hardware/notes/005`. (A feed's own loop,
+/// `ae.rs`, starts from the exposure set here and never goes above it.)
 ///
 /// A failure here is a warning, not an abort: `ir-up.sh` has always warned and
 /// continued, and the post-capture readback is what catches the consequence.

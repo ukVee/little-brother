@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
+mod ae;
 mod capture;
 mod dkms;
 mod faults;

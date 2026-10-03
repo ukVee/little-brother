@@ -44,7 +44,17 @@
 //!   and starts the feed.
 //! - **No frame reaches disk or the journal.** The journal gets counts and
 //!   timings, and core dumps are off for the daemon ([`forbid_core_dumps`]).
+//!
+//! # Auto-exposure (the feed only)
+//!
+//! A feed runs [`ae`]'s loop on the frames it unpacks: in direct sun it
+//! shortens the exposure until the centre stops clipping, and a room lit by
+//! the emitter alone is never touched. The requested exposure is the
+//! ceiling. A `frames` capture keeps exactly the exposure its caller asked
+//! for: it is a measuring primitive, and its caller has the header `mean` to
+//! run its own loop. `IRFACED_AUTO_EXPOSURE=0` turns the loop off.
 
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -53,10 +63,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use irctl::video;
+use irctl::{subdev, video};
 use tps68470::bus::Bus;
 use tps68470::torch::{self, Torch};
 
+use crate::ae::{self, Ae};
 use crate::capture::{self, Graph};
 use crate::faults;
 use crate::signals;
@@ -617,6 +628,37 @@ struct Feed {
     since_refresh: Instant,
     frames: u32,
     ready_sent: bool,
+    /// The auto-exposure loop and the sensor subdev it writes, or `None` when
+    /// it is off (by configuration, or after a failed write).
+    ae: Option<(Ae, File)>,
+}
+
+/// Exposure changes journaled per feed; the rest are only counted.
+const AE_LOG_CHANGES: u32 = 8;
+
+/// One frame of the feed's auto-exposure loop: meter it, and write a new
+/// exposure to the sensor when the loop asks for one. A write that fails
+/// turns the loop off for the rest of the feed; the feed itself goes on at
+/// whatever exposure the sensor last took.
+fn auto_expose(ae: &mut Option<(Ae, File)>, grey: &[u8]) {
+    let Some((a, sd)) = ae.as_mut() else { return };
+    if a.settling() {
+        return;
+    }
+    let from = a.exposure();
+    let Some((to, why)) = a.step(ae::meter(grey, ip3y::WIDTH, ip3y::HEIGHT)) else {
+        return;
+    };
+    match subdev::set_ctrl(sd, subdev::CID_EXPOSURE, to as i32) {
+        Ok(()) if a.changes() <= AE_LOG_CHANGES => {
+            eprintln!("irfaced: ae: exposure {from} -> {to} ({})", why.word())
+        }
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("irfaced: ae: set exposure={to} failed: {e}; fixed at {from} from here");
+            *ae = None;
+        }
+    }
 }
 
 impl Feed {
@@ -630,6 +672,7 @@ impl Feed {
         mut client: UnixStream,
         media_path: &Path,
         loopback: &str,
+        auto_exposure: bool,
     ) -> Result<Feed, ()> {
         let fail = |client: &mut UnixStream, msg: &str| {
             send_line(client, &format!("error {msg}"));
@@ -660,6 +703,22 @@ impl Feed {
                 return Err(());
             }
         };
+        // A failure here costs the loop, never the feed: fixed exposure is
+        // what every feed had before.
+        let ae = match (auto_exposure, &graph.subdev) {
+            (false, _) => None,
+            (true, None) => {
+                eprintln!("irfaced: ae: no sensor subdev; fixed exposure");
+                None
+            }
+            (true, Some(sd)) => match File::open(sd) {
+                Ok(f) => Some((Ae::new(req.exposure), f)),
+                Err(e) => {
+                    eprintln!("irfaced: ae: cannot open {}: {e}; fixed exposure", sd.display());
+                    None
+                }
+            },
+        };
 
         Ok(Feed {
             req,
@@ -673,6 +732,7 @@ impl Feed {
             since_refresh: Instant::now(),
             frames: 0,
             ready_sent: false,
+            ae,
         })
     }
 
@@ -702,12 +762,13 @@ impl Feed {
             }
         }
         // One capture -> unpack -> loopback hop, if a frame is ready.
-        let Self { cap, sink, client, frames, ready_sent, graph, .. } = self;
+        let Self { cap, sink, client, frames, ready_sent, graph, ae, .. } = self;
         let result = cap.with_frame(TICK_MS, |frame| {
             let mut px = vec![0u16; ip3y::PIXELS];
             ip3y::unpack(frame, &mut px);
             // 10-bit -> 8-bit (the >>2 the Python feeder used).
             let grey: Vec<u8> = px.iter().map(|v| (v >> 2) as u8).collect();
+            auto_expose(ae, &grey);
             match sink.write_frame(&grey, TICK_MS) {
                 Ok(true) => {
                     *frames += 1;
@@ -751,14 +812,18 @@ impl Feed {
         let torch = self.torch.take();
         let t = capture::teardown("irfaced", torch, &mut self.cap, Some(&mut self.sink), &self.graph);
         eprintln!(
-            "irfaced: fed {} frames from {} ({} -> {}); {}; dur={}s steps={}",
+            "irfaced: fed {} frames from {} ({} -> {}); {}; dur={}s steps={} ae={}",
             self.frames,
             self.graph.video.display(),
             self.graph.sensor,
             self.graph.csi2,
             t.readback.describe(),
             self.duration_secs,
-            self.req.current_steps
+            self.req.current_steps,
+            match &self.ae {
+                Some((a, _)) => format!("{} change(s)", a.changes()),
+                None => "off".into(),
+            }
         );
         // A feed that streamed nothing, or one whose teardown did not come
         // apart cleanly, is the wedge showing up on the auth path itself. The
@@ -1007,6 +1072,8 @@ struct Ctx {
     loopback: String,
     /// The daemon's own euid, for [`may_use`].
     own_euid: u32,
+    /// Whether feeds run the auto-exposure loop (`IRFACED_AUTO_EXPOSURE`).
+    auto_exposure: bool,
 }
 
 fn start_feed(
@@ -1018,7 +1085,14 @@ fn start_feed(
 ) {
     // Feed::start replies "error <reason>" on the socket itself on any
     // failure; on success the socket is the feed's ready-reply channel.
-    if let Ok(f) = Feed::start(req, duration_secs, stream, &ctx.media_path, &ctx.loopback) {
+    if let Ok(f) = Feed::start(
+        req,
+        duration_secs,
+        stream,
+        &ctx.media_path,
+        &ctx.loopback,
+        ctx.auto_exposure,
+    ) {
         *active = Some(Active::Feed(f));
     }
 }
@@ -1122,6 +1196,10 @@ pub fn daemon_run() -> std::process::ExitCode {
         loopback: env_or("IRFACED_LOOPBACK", "/dev/video20"),
         // SAFETY: geteuid() is always safe; the wrapper just isn't marked.
         own_euid: unsafe { libc::geteuid() },
+        auto_exposure: !matches!(
+            env_or("IRFACED_AUTO_EXPOSURE", "1").as_str(),
+            "0" | "off" | "no" | "false"
+        ),
     };
     let idle_secs: u64 = env_or("IRFACED_IDLE_SECS", &DEFAULT_IDLE_SECS.to_string())
         .parse()
@@ -1149,9 +1227,10 @@ pub fn daemon_run() -> std::process::ExitCode {
     };
     listener.set_nonblocking(true).expect("set_nonblocking on the listen socket");
     eprintln!(
-        "irfaced: media={} loopback={} idle_timeout={idle_secs}s",
+        "irfaced: media={} loopback={} idle_timeout={idle_secs}s auto_exposure={}",
         ctx.media_path.display(),
-        ctx.loopback
+        ctx.loopback,
+        if ctx.auto_exposure { "on" } else { "off" }
     );
 
     let mut active: Option<Active> = None;
@@ -1582,6 +1661,7 @@ mod tests {
             media_path: PathBuf::from("/nonexistent/cement-ir-test-media"),
             loopback: "/nonexistent/cement-ir-test-loopback".to_string(),
             own_euid,
+            auto_exposure: true,
         }
     }
 

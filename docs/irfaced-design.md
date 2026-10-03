@@ -129,6 +129,40 @@ gain u16 | exposure u32 | kind u8 (1 = frames) | count u8 (1..=10) | reserved[11
 each frame's offset, mean and darkness, re-derives both from the pixels to
 check the transfer, and drops the pixels.
 
+### Auto-exposure: the feed only (2026-10-03)
+
+The production point (1 step, gain 128, exposure 1704) is a dark-room point.
+In direct sun (~3,500 lux) it puts 99.6 % of every frame at full scale,
+emitter on or off, and howdy finds no face. Exposures of 25..200 lines bring
+the face back (garden `projects/cement-ir/notes/007`). So a feed runs a small
+loop (`src/ae.rs`) on the frames it is already unpacking:
+
+- **It meters the centre** (middle half across, 15–85 % down) for its median
+  and p95, and the whole frame for darkness.
+- **It shortens only on a frame that is clipped AND ambient-lit:** the centre
+  p95 is at 250 or above, and under half the frame is dark. Half the centre
+  at full scale quarters the exposure; otherwise it halves. A room lit by the
+  emitter alone is mostly dark (92 %), so the dark-room path never changes.
+- **It lengthens toward a centre p95 of 230** (at most ×2 a step) when the
+  p95 is under 200. It never goes past the requested exposure, which is the
+  ceiling, and never below 16 lines.
+- **It skips 2 frames after each change**, because the sensor applies a new
+  exposure at a frame boundary. A sunlit start settles in about 10 frames
+  (1704 → 426 → 106 → ~210 in the unit tests' model scene).
+- **A failed write turns the loop off** for the rest of that feed, never the
+  feed itself. `IRFACED_AUTO_EXPOSURE=0` turns it off for the daemon. The
+  journal gets each change (`ae: exposure 1704 -> 426 (blown)`, the first 8
+  per feed) and a count on the `fed` line, never a frame statistic.
+
+A `frames` capture keeps exactly the exposure its caller asked for. It is a
+measuring primitive (the spike's exposure sweep depends on it), and its
+caller has the header `mean` to run its own loop.
+
+Not the ambient light sensor: it reads visible light (lux), and LED room
+light is bright to it but nearly invisible to this camera. And not a fix for
+matching in direct sun: at a good exposure the face scored 0.49–0.65 there,
+because 97 % of the light on it was sunlight (notes/007).
+
 ### Teardown ordering (inherited from `irface.py cmd_feed`)
 
 1. **Torch out first** — the illuminator must never outlive the feed by one
